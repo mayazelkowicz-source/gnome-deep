@@ -575,7 +575,7 @@
     overlayBoxEl.innerHTML = html;
     overlayEl.className = 'show ' + kind;
     const btn = overlayBoxEl.querySelector('button');
-    if (btn) btn.addEventListener('click', () => { initAudio(); restartRun(); });
+    if (btn) btn.addEventListener('click', () => { initAudio(); if (state === 'ready') startRun(); else restartRun(); });
   }
 
   function showIntro() {
@@ -590,7 +590,8 @@
         <li>Score = diamonds × ${DIAMOND_POINTS} × time bonus (up to ×${MAX_BONUS}).</li>
       </ul>
       ${bestScore ? `<p class="sub">Best score: <b>${fmtNum(bestScore)}</b></p>` : ''}
-      <p>Press <b>Enter</b> or <b>Space</b> to start</p>`);
+      <button type="button">Start digging</button>
+      <p class="sub" style="margin-top:10px">or press <b>Enter</b> / <b>Space</b></p>`);
   }
 
   function showResults() {
@@ -1217,7 +1218,7 @@
   }
   function drawDustHint(x, y, k) {
     for (let i = 0; i < 5; i++) {
-      const t = (time * 0.35 + i / 5 + k * 0.13) % 1;
+      const t = (((time * 0.35 + i / 5 + k * 0.13) % 1) + 1) % 1;   // k can be negative left of the start
       const px = x + (i - 2) * 11 + t * 14, py = y + 12 - t * 34;
       ctx.fillStyle = `rgba(150, 128, 100, ${(1 - t) * t * 0.9})`;
       ctx.beginPath();
