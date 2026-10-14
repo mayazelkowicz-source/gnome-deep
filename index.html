@@ -124,7 +124,7 @@
   <h1>GNOME DEEP <span>: Maze of Greed</span></h1>
   <p>A / D or ← / → to walk &nbsp;·&nbsp; Space (or W / ↑) to jump</p>
   <p>At a ladder junction: W / ↑ to climb up, S / ↓ to climb down, or keep walking straight</p>
-  <p>M map size &nbsp;·&nbsp; X sound on/off</p>
+  <p>M map size &nbsp;·&nbsp; G route guide on/off &nbsp;·&nbsp; X sound on/off</p>
   <p id="stats"></p>
   <p id="best"></p>
 </div>
@@ -157,6 +157,7 @@
   const overlayBoxEl = document.getElementById('overlayBox');
   let W = 0, H = 0, DPR = 1;
   let mapBig = false, MW = 220, MH = 160;
+  let showGuide = true;   // green route to the exit on the minimap + arrow by the gnome
 
   function resize() {
     DPR = Math.min(window.devicePixelRatio || 1, 2);
@@ -196,6 +197,7 @@
       if (e.code === 'KeyW' || e.code === 'ArrowUp') pressedAt.up = now;
       if (e.code === 'KeyS' || e.code === 'ArrowDown') pressedAt.down = now;
       if (e.code === 'KeyM') { mapBig = !mapBig; sizeMinimap(); }
+      if (e.code === 'KeyG') showGuide = !showGuide;
       if (e.code === 'KeyX') toggleMute();
       if ((e.code === 'Enter' || e.code === 'Space') && state === 'ready') startRun();
       if (e.code === 'KeyR' && (state === 'won' || state === 'dead')) restartRun();
@@ -363,7 +365,7 @@
   const SHAFT_HALF = 34;   // half-width of a ladder shaft
   const START_ROW = 2;
   const CHUNK_ROWS = 8;    // rows per generated chunk
-  const OPEN_CHANCE = 0.6;
+  const OPEN_CHANCE = 0.92;   // high so dead ends are rare (~7% of junctions); they're flagged on the map
   const SHAFT_CHANCE = 0.3;
 
   const EXIT_SEGMENT = 15;   // the exit is always this many segments to the right of the start
@@ -423,6 +425,91 @@
   function roomAt(j, row) {
     return segOpen(j - 1, row) || segOpen(j, row) || shaftAt(j, row) || shaftAt(j, row - 1);
   }
+  // A junction chamber with only one way in or out
+  function isDeadEnd(j, row) {
+    if (!roomAt(j, row)) return false;
+    const ways = segOpen(j - 1, row) + segOpen(j, row) + shaftAt(j, row) + shaftAt(j, row - 1);
+    return ways === 1;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Route to the exit — breadth-first search over the tunnel graph.
+  // Nodes are tunnel segments ['s', s, row] and junction chambers ['j', j, row].
+  // ---------------------------------------------------------------------------
+  const nodeKey = n => n[0] + n[1] + ',' + n[2];
+  const nodeX = n => n[0] === 's' ? (n[1] + 0.5) * CW : n[1] * CW;
+
+  function neighbors(n) {
+    const [k, i, r] = n, out = [];
+    if (k === 's') {
+      out.push(['j', i, r], ['j', i + 1, r]);
+    } else {
+      if (segOpen(i - 1, r)) out.push(['s', i - 1, r]);
+      if (segOpen(i, r)) out.push(['s', i, r]);
+      if (shaftAt(i, r)) out.push(['j', i, r + 1]);
+      if (shaftAt(i, r - 1)) out.push(['j', i, r - 1]);
+    }
+    return out;
+  }
+
+  function gnomeNode() {
+    const g = gnome;
+    const row = g.climb ? g.climb.targetRow : g.row;
+    const x = g.climb ? g.climb.j * CW : g.x;
+    const j = Math.round(x / CW);
+    if (Math.abs(x - j * CW) <= ROOM_HALF && roomAt(j, row)) return ['j', j, row];
+    return ['s', Math.floor(x / CW), row];
+  }
+
+  function findPath(start) {
+    const sMin = Math.min(start[1], 0) - 4, sMax = EXIT_SEGMENT + 3;
+    let rMax = start[2];
+    for (let i = sMin; i <= sMax; i++) rMax = Math.max(rMax, spineRow(i));
+    rMax += 4;
+    const goal = nodeKey(['s', exit.cx, exit.row]);
+    const prev = new Map([[nodeKey(start), null]]);
+    const queue = [start];
+    for (let qi = 0; qi < queue.length; qi++) {
+      const n = queue[qi], key = nodeKey(n);
+      if (key === goal) {
+        const path = [];
+        for (let cur = n; cur; cur = prev.get(nodeKey(cur))) path.unshift(cur);
+        return path;
+      }
+      for (const m of neighbors(n)) {
+        if (m[1] < sMin || m[1] > sMax + 1 || m[2] < 0 || m[2] > rMax) continue;
+        const mk = nodeKey(m);
+        if (prev.has(mk)) continue;
+        prev.set(mk, n);
+        queue.push(m);
+      }
+    }
+    return null;
+  }
+
+  let guidePath = null, guideFrom = '';
+  function updateGuide() {
+    const start = gnomeNode(), key = nodeKey(start);
+    if (key === guideFrom) return;
+    guideFrom = key;
+    guidePath = findPath(start);
+  }
+
+  // Which way to go next: 'left' | 'right' | 'up' | 'down' | null
+  function nextMove() {
+    const g = gnome;
+    if (!guidePath || g.climb) return null;
+    if (guidePath.length === 1) return exit.x > g.x ? 'right' : 'left';
+    const [cur, next] = guidePath;
+    if (next[2] !== cur[2]) {
+      // Ladders can only be grabbed near the shaft — walk to it first
+      const lx = next[1] * CW;
+      if (Math.abs(g.x - lx) > ROOM_HALF - 12) return lx > g.x ? 'right' : 'left';
+      return next[2] < cur[2] ? 'up' : 'down';
+    }
+    return nodeX(next) > g.x ? 'right' : 'left';
+  }
+
   function isCarved(x, row) {
     if (segOpen(Math.floor(x / CW), row)) return true;
     const j = Math.round(x / CW);
@@ -531,6 +618,8 @@
   function initMine(newSeed, startState) {
     seed = newSeed >>> 0;
     spineCache = new Map([[0, START_ROW]]);
+    guideFrom = '';
+    guidePath = null;
     chunks = new Map();
     explored = new Set();
     collected = new Set();
@@ -933,6 +1022,7 @@
     camera.y += (g.y - H * 0.62 - camera.y) * Math.min(1, dt * 6);
 
     markExplored();
+    updateGuide();
     evictChunks();
 
     // Reaching the exit freezes the game (state leaves 'play') and shows results
@@ -1195,6 +1285,7 @@
           drawLadder(jx, fy - 46, fy + RH);
           drawHatch(jx, fy);
         }
+        if (isDeadEnd(j, row) && (segOpen(j - 1, row) || segOpen(j, row))) drawDeadEndSign(jx, fy, segOpen(j - 1, row) ? 1 : -1, j * 7 + row);
       }
     }
   }
@@ -1417,6 +1508,60 @@
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('EXIT', x, sy + 1);
+    ctx.restore();
+  }
+
+  // Rubble and a warning board at the blocked side of a dead-end chamber
+  function drawDeadEndSign(jx, fy, side, salt) {
+    const wx = jx + side * (ROOM_HALF - 6);
+    ctx.fillStyle = '#3a2d22';
+    for (let i = 0; i < 6; i++) {
+      const r = 8 + hash(i + salt * 13, 31) * 10;
+      ctx.beginPath();
+      ctx.arc(wx - side * hash(i + salt * 13, 32) * 24, fy - r * 0.6 - hash(i + salt * 13, 33) * 30, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const bx = jx - side * 4, by = fy - 120;
+    ctx.fillStyle = '#5b3d22';
+    ctx.fillRect(bx - 3, by, 6, 120);
+    ctx.fillStyle = '#6e4a2a';
+    ctx.fillRect(bx - 44, by - 26, 88, 30);
+    ctx.strokeStyle = '#3d2a17';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bx - 44, by - 26, 88, 30);
+    ctx.fillStyle = '#ff6b5a';
+    ctx.font = 'bold 13px Trebuchet MS, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('✕ DEAD END', bx, by - 11);
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  // Green arrow next to the gnome showing the next step toward the exit
+  function drawGuideArrow() {
+    if (!showGuide || state !== 'play') return;
+    const move = nextMove();
+    if (!move) return;
+    const g = gnome;
+    const sx = g.x - camera.x, sy = g.y - camera.y;
+    const bob = Math.sin(time * 5) * 4;
+    const angle = { right: 0, left: Math.PI, up: -Math.PI / 2, down: Math.PI / 2 }[move];
+    const ax = move === 'right' ? sx + 40 + bob : move === 'left' ? sx - 40 - bob : sx - 34 * g.facing;
+    const ay = move === 'up' ? sy - 100 - bob : move === 'down' ? sy - 40 + bob : sy - 100;
+    ctx.save();
+    ctx.translate(ax, ay);
+    ctx.rotate(angle);
+    ctx.shadowColor = '#5dff8a';
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = 'rgba(120, 255, 150, 0.9)';
+    ctx.strokeStyle = 'rgba(10, 40, 20, 0.8)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(16, 0); ctx.lineTo(0, -13); ctx.lineTo(0, -6); ctx.lineTo(-14, -6);
+    ctx.lineTo(-14, 6); ctx.lineTo(0, 6); ctx.lineTo(0, 13);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.fill();
     ctx.restore();
   }
 
@@ -1760,33 +1905,93 @@
     // Cave-in front
     const [wx] = toMap(wallX / CW, 0);
     if (wx > 0) {
-      mctx.fillStyle = 'rgba(120, 30, 20, 0.45)';
+      mctx.fillStyle = 'rgba(120, 30, 20, 0.3)';
       mctx.fillRect(0, 0, Math.min(MW, wx), MH);
+      mctx.fillStyle = 'rgba(255, 90, 60, 0.7)';
+      mctx.fillRect(Math.min(MW, wx) - 2, 0, 2, MH);
     }
 
-    // Exit: a glowing beacon when in view, otherwise a glowing arrow on the edge pointing at it
+    // Dead ends — flagged before you reach them: on your level and the ones next to it,
+    // or wherever an explored tunnel leads into one. Hidden behind the cave-in.
+    mctx.strokeStyle = '#ff5a4a';
+    mctx.lineWidth = 2;
+    const xs = mapBig ? 5 : 4;
+    for (let row = r0; row <= r1; row++) {
+      for (let j = s0; j <= s1 + 1; j++) {
+        if (!isDeadEnd(j, row)) continue;
+        const [x, y] = toMap(j, row);
+        if (x < wx) continue;
+        const nearLevel = Math.abs(row - g.row) <= 1;
+        const seen = explored.has('s' + (j - 1) + ',' + row) || explored.has('s' + j + ',' + row) ||
+          explored.has('j' + j + ',' + row) || explored.has('j' + j + ',' + (row - 1));
+        if (!nearLevel && !seen) continue;
+        mctx.beginPath();
+        mctx.moveTo(x - xs, y - xs); mctx.lineTo(x + xs, y + xs);
+        mctx.moveTo(x + xs, y - xs); mctx.lineTo(x - xs, y + xs);
+        mctx.stroke();
+      }
+    }
+
+    // Route to the exit
+    if (showGuide && guidePath) {
+      mctx.save();
+      mctx.strokeStyle = 'rgba(110, 255, 140, 0.9)';
+      mctx.shadowColor = '#5dff8a';
+      mctx.shadowBlur = 6;
+      mctx.lineWidth = 2;
+      mctx.lineJoin = 'round';
+      mctx.setLineDash([5, 4]);
+      mctx.lineDashOffset = -time * 20;
+      mctx.beginPath();
+      mctx.moveTo(MW / 2, MH / 2);
+      for (let i = 1; i < guidePath.length; i++) {
+        const n = guidePath[i];
+        const [x, y] = toMap(n[0] === 's' ? n[1] + 0.5 : n[1], n[2]);
+        mctx.lineTo(x, y);
+      }
+      const [gx, gy] = toMap(exit.x / CW, exit.row);
+      mctx.lineTo(gx, gy);
+      mctx.stroke();
+      mctx.restore();
+    }
+
+    // Exit: a gold beacon with a label when in view, otherwise a big arrow on the edge pointing at it
     const pulse = 0.6 + 0.4 * Math.sin(time * 4);
     const [ex, ey] = toMap(exit.x / CW, exit.row);
-    const margin = 12;
+    const margin = 16;
+    const exitDist = Math.max(0, Math.round((exit.x - g.x) / 40));
     mctx.save();
-    mctx.shadowColor = '#8cffaa';
-    mctx.shadowBlur = 12 * pulse + 6;
-    mctx.fillStyle = `rgba(160, 255, 185, ${0.7 + 0.3 * pulse})`;
+    mctx.shadowColor = '#ffd56a';
+    mctx.shadowBlur = 14 * pulse + 6;
+    mctx.fillStyle = '#ffd56a';
+    mctx.font = 'bold 10px Trebuchet MS, sans-serif';
+    mctx.textAlign = 'center';
     if (ex > margin && ex < MW - margin && ey > margin && ey < MH - margin) {
+      mctx.strokeStyle = `rgba(255, 213, 106, ${pulse})`;
+      mctx.lineWidth = 2;
+      mctx.beginPath(); mctx.arc(ex, ey, 7 + pulse * 5, 0, Math.PI * 2); mctx.stroke();
       mctx.beginPath();
       mctx.moveTo(ex, ey - 7); mctx.lineTo(ex + 6, ey); mctx.lineTo(ex, ey + 7); mctx.lineTo(ex - 6, ey);
       mctx.closePath();
       mctx.fill();
+      mctx.fillText('EXIT', ex, ey - 16);
     } else {
       const dx = ex - MW / 2, dy = ey - MH / 2;
       const t = Math.min((MW / 2 - margin) / Math.abs(dx || 1e-6), (MH / 2 - margin) / Math.abs(dy || 1e-6));
       const ax = MW / 2 + dx * t, ay = MH / 2 + dy * t;
+      const ang = Math.atan2(dy, dx);
+      mctx.save();
       mctx.translate(ax, ay);
-      mctx.rotate(Math.atan2(dy, dx));
+      mctx.rotate(ang);
       mctx.beginPath();
-      mctx.moveTo(9, 0); mctx.lineTo(-6, -7); mctx.lineTo(-2, 0); mctx.lineTo(-6, 7);
+      mctx.moveTo(12, 0); mctx.lineTo(-8, -10); mctx.lineTo(-3, 0); mctx.lineTo(-8, 10);
       mctx.closePath();
       mctx.fill();
+      mctx.restore();
+      // Label sits inside the arrow, toward the map centre, clear of the arrowhead
+      const label = `EXIT ${exitDist} m`, half = mctx.measureText(label).width / 2;
+      const lx = ax - Math.cos(ang) * (16 + half), ly = ay - Math.sin(ang) * 20 + 4;
+      mctx.fillText(label, Math.max(half + 4, Math.min(MW - half - 4, lx)), Math.max(12, Math.min(MH - 6, ly)));
     }
     mctx.restore();
 
@@ -1832,6 +2037,7 @@
     drawExit();
     drawGnome(gnome.x - camera.x, gnome.y - camera.y);
     drawJunctionPrompts();
+    drawGuideArrow();
     drawParticles();
     drawWall();
     drawDust();
