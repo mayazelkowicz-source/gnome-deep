@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gnome Deep: Maze of Greed</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #0b0812;
+    font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+    color: #e8dcc0;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; image-rendering: auto; }
+  #hud {
+    position: fixed; top: 14px; left: 16px;
+    pointer-events: none;
+    text-shadow: 0 2px 4px #000;
+  }
+  #hud h1 {
+    font-size: 22px; letter-spacing: 2px;
+    color: #f2c14e;
+  }
+  #hud h1 span { color: #c9b28a; font-size: 15px; letter-spacing: 1px; }
+  #hud p { font-size: 13px; opacity: 0.8; margin-top: 4px; }
+  #depth {
+    position: fixed; top: 14px; right: 16px;
+    font-size: 14px; text-shadow: 0 2px 4px #000;
+    pointer-events: none; text-align: right;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">
+  <h1>GNOME DEEP <span>: Maze of Greed</span></h1>
+  <p>A / D or ← / → to walk &nbsp;·&nbsp; W / ↑ / Space to jump</p>
+</div>
+<div id="depth">Distance: <b id="dist">0</b> m</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------------------------------------------------------------------------
+  // Canvas setup
+  // ---------------------------------------------------------------------------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const distEl = document.getElementById('dist');
+  let W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------------------------------------------------------------------------
+  // Input
+  // ---------------------------------------------------------------------------
+  const keys = new Set();
+  const JUMP_KEYS = ['KeyW', 'ArrowUp', 'Space'];
+  let jumpPressedAt = -Infinity;
+
+  window.addEventListener('keydown', e => {
+    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+    if (JUMP_KEYS.includes(e.code) && !keys.has(e.code)) jumpPressedAt = performance.now();
+    keys.add(e.code);
+  });
+  window.addEventListener('keyup', e => keys.delete(e.code));
+  window.addEventListener('blur', () => keys.clear());
+
+  const left  = () => keys.has('KeyA') || keys.has('ArrowLeft');
+  const right = () => keys.has('KeyD') || keys.has('ArrowRight');
+  const jumpHeld = () => JUMP_KEYS.some(k => keys.has(k));
+
+  // ---------------------------------------------------------------------------
+  // Deterministic noise — lets the world generate endlessly in both directions
+  // ---------------------------------------------------------------------------
+  function hash(n, seed) {
+    let h = (n * 374761393 + seed * 668265263) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    h ^= h >>> 16;
+    return (h >>> 0) / 4294967296;
+  }
+  function smoothNoise(x, seed) {
+    const i = Math.floor(x), f = x - i;
+    const t = f * f * (3 - 2 * f);
+    return hash(i, seed) * (1 - t) + hash(i + 1, seed) * t;
+  }
+
+  // ---------------------------------------------------------------------------
+  // World constants
+  // ---------------------------------------------------------------------------
+  const GRAVITY = 2200;
+  const MOVE_ACCEL = 2600;
+  const MAX_SPEED = 300;
+  const FRICTION = 2200;
+  const AIR_CONTROL = 0.6;
+  const JUMP_VEL = 780;
+  const COYOTE_TIME = 0.1;
+  const JUMP_BUFFER = 0.12;
+  const groundY = () => H * 0.78;
+
+  // ---------------------------------------------------------------------------
+  // Gnome
+  // ---------------------------------------------------------------------------
+  const gnome = {
+    x: 0, y: 0, vx: 0, vy: 0,
+    w: 30, h: 54,
+    facing: 1,
+    onGround: true,
+    lastGrounded: 0,
+    walkPhase: 0,
+    squash: 1,
+  };
+  gnome.y = groundY();
+
+  // ---------------------------------------------------------------------------
+  // Camera — keeps the gnome near screen centre with a small dead zone
+  // ---------------------------------------------------------------------------
+  const camera = { x: 0 };
+  const DEAD_ZONE = 40;
+
+  // ---------------------------------------------------------------------------
+  // Parallax layers (factor: 0 = static, 1 = moves with world)
+  // ---------------------------------------------------------------------------
+  const layers = [
+    { factor: 0.08, seed: 11, seg: 260, base: 0.30, amp: 0.22, color: '#1d1530', stalactite: true },
+    { factor: 0.18, seed: 23, seg: 200, base: 0.42, amp: 0.20, color: '#271c3d', stalactite: true },
+    { factor: 0.32, seed: 37, seg: 160, base: 0.56, amp: 0.16, color: '#33264a', stalactite: false },
+    { factor: 0.55, seed: 51, seg: 120, base: 0.66, amp: 0.10, color: '#40305a', stalactite: false },
+  ];
+
+  // Ridge silhouette rising from the floor
+  function drawRidge(layer, gy) {
+    const off = camera.x * layer.factor;
+    const step = 12;
+    ctx.fillStyle = layer.color;
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let sx = -step; sx <= W + step; sx += step) {
+      const wx = (sx + off) / layer.seg;
+      const n = smoothNoise(wx, layer.seed) * 0.7 + smoothNoise(wx * 3.1, layer.seed + 5) * 0.3;
+      const y = H * layer.base + (1 - n) * H * layer.amp;
+      ctx.lineTo(sx, Math.min(y, gy + 10));
+    }
+    ctx.lineTo(W + step, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Ceiling with stalactites hanging down
+  function drawCeiling(layer) {
+    const off = camera.x * layer.factor;
+    const step = 12;
+    ctx.fillStyle = layer.color;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    for (let sx = -step; sx <= W + step; sx += step) {
+      const wx = (sx + off) / layer.seg;
+      const n = smoothNoise(wx, layer.seed + 99);
+      ctx.lineTo(sx, H * 0.04 + n * H * 0.08 * (1 + layer.factor * 2));
+    }
+    ctx.lineTo(W + step, 0);
+    ctx.closePath();
+    ctx.fill();
+
+    // Individual stalactites placed per world cell
+    const cell = 70;
+    const first = Math.floor((off - cell) / cell);
+    const last = Math.ceil((off + W + cell) / cell);
+    for (let i = first; i <= last; i++) {
+      const r = hash(i, layer.seed + 7);
+      if (r < 0.45) continue;
+      const sx = i * cell - off + hash(i, layer.seed + 3) * cell;
+      const len = (0.05 + hash(i, layer.seed + 4) * 0.12) * H * (0.6 + layer.factor);
+      const wid = 8 + hash(i, layer.seed + 8) * 18;
+      const topY = H * 0.06;
+      ctx.beginPath();
+      ctx.moveTo(sx - wid, topY);
+      ctx.lineTo(sx + wid, topY);
+      ctx.lineTo(sx + 1, topY + len);
+      ctx.lineTo(sx - 1, topY + len);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // Glowing crystals on mid layer for atmosphere
+  function drawCrystals(factor, seed, gy) {
+    const off = camera.x * factor;
+    const cell = 180;
+    const first = Math.floor((off - cell) / cell);
+    const last = Math.ceil((off + W + cell) / cell);
+    for (let i = first; i <= last; i++) {
+      if (hash(i, seed) < 0.6) continue;
+      const sx = i * cell - off + hash(i, seed + 1) * cell;
+      const sy = H * (0.6 + hash(i, seed + 2) * 0.1);
+      const hue = hash(i, seed + 3) < 0.5 ? 190 : 280;
+      const s = 6 + hash(i, seed + 4) * 8;
+      const pulse = 0.6 + 0.4 * Math.sin(time * 2 + i);
+      const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, s * 5);
+      g.addColorStop(0, `hsla(${hue}, 90%, 70%, ${0.35 * pulse})`);
+      g.addColorStop(1, `hsla(${hue}, 90%, 50%, 0)`);
+      ctx.fillStyle = g;
+      ctx.fillRect(sx - s * 5, sy - s * 5, s * 10, s * 10);
+      ctx.fillStyle = `hsla(${hue}, 80%, ${60 + pulse * 15}%, 0.9)`;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - s * 1.8);
+      ctx.lineTo(sx + s * 0.5, sy);
+      ctx.lineTo(sx, sy + s * 0.3);
+      ctx.lineTo(sx - s * 0.5, sy);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // Foreground ground strip (factor 1 — locked to the world)
+  function drawGround(gy) {
+    const off = camera.x;
+    const grd = ctx.createLinearGradient(0, gy, 0, H);
+    grd.addColorStop(0, '#5a4632');
+    grd.addColorStop(0.15, '#3d2f22');
+    grd.addColorStop(1, '#1a130d');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, gy, W, H - gy);
+
+    // Moss edge
+    ctx.fillStyle = '#4c6b3a';
+    ctx.fillRect(0, gy - 2, W, 4);
+
+    // Pebbles & embedded stones
+    const cell = 46;
+    const first = Math.floor((off - cell) / cell);
+    const last = Math.ceil((off + W + cell) / cell);
+    for (let i = first; i <= last; i++) {
+      const sx = i * cell - off + hash(i, 501) * cell;
+      const sy = gy + 10 + hash(i, 502) * (H - gy - 20);
+      const r = 2 + hash(i, 503) * 6;
+      ctx.fillStyle = hash(i, 504) < 0.5 ? '#2a2018' : '#6a5440';
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, r * 1.4, r, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Mushrooms on the surface
+    const mcell = 140;
+    const mf = Math.floor((off - mcell) / mcell);
+    const ml = Math.ceil((off + W + mcell) / mcell);
+    for (let i = mf; i <= ml; i++) {
+      if (hash(i, 601) < 0.55) continue;
+      const sx = i * mcell - off + hash(i, 602) * mcell;
+      const s = 0.6 + hash(i, 603) * 0.8;
+      drawMushroom(sx, gy, s, hash(i, 604) < 0.5 ? '#c0392b' : '#8e44ad');
+    }
+  }
+
+  function drawMushroom(x, y, s, cap) {
+    ctx.fillStyle = '#e8dcc0';
+    ctx.fillRect(x - 2 * s, y - 10 * s, 4 * s, 10 * s);
+    ctx.fillStyle = cap;
+    ctx.beginPath();
+    ctx.ellipse(x, y - 10 * s, 9 * s, 6 * s, 0, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.beginPath(); ctx.arc(x - 3 * s, y - 13 * s, 1.4 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + 3 * s, y - 12 * s, 1.1 * s, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Floating dust motes (nearest layer, slightly faster than world)
+  function drawDust() {
+    const factor = 1.25;
+    const off = camera.x * factor;
+    const cell = 90;
+    const first = Math.floor((off - cell) / cell);
+    const last = Math.ceil((off + W + cell) / cell);
+    for (let i = first; i <= last; i++) {
+      const sx = i * cell - off + hash(i, 701) * cell;
+      const sy = (hash(i, 702) * H * 0.9 + time * (8 + hash(i, 703) * 12)) % H;
+      const a = 0.15 + 0.2 * Math.sin(time * 1.5 + i);
+      ctx.fillStyle = `rgba(242, 193, 78, ${a})`;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 1 + hash(i, 704) * 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Gnome rendering
+  // ---------------------------------------------------------------------------
+  function drawGnome(sx, sy) {
+    const g = gnome;
+    ctx.save();
+    ctx.translate(sx, sy);
+
+    // Shadow
+    const airH = Math.max(0, groundY() - g.y);
+    const shadowS = Math.max(0.3, 1 - airH / 250);
+    ctx.fillStyle = `rgba(0,0,0,${0.35 * shadowS})`;
+    ctx.beginPath();
+    ctx.ellipse(0, airH, 18 * shadowS, 4 * shadowS, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.scale(g.facing * (2 - g.squash), g.squash);
+
+    const moving = Math.abs(g.vx) > 10 && g.onGround;
+    const swing = moving ? Math.sin(g.walkPhase) : 0;
+    const bob = moving ? Math.abs(Math.sin(g.walkPhase)) * 2 : 0;
+
+    // Legs / boots
+    ctx.fillStyle = '#3b2a1a';
+    const legL = g.onGround ? swing * 6 : -4;
+    const legR = g.onGround ? -swing * 6 : 5;
+    ctx.fillRect(-8 + legL, -12, 6, 10);
+    ctx.fillRect(2 + legR, -12, 6, 10);
+    ctx.fillStyle = '#1e140c';
+    ctx.beginPath(); ctx.ellipse(-4 + legL, -2, 6, 3.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(6 + legR, -2, 6, 3.5, 0, 0, Math.PI * 2); ctx.fill();
+
+    ctx.translate(0, -bob);
+
+    // Body (tunic)
+    ctx.fillStyle = '#2f6e3b';
+    ctx.beginPath();
+    ctx.moveTo(-12, -10);
+    ctx.lineTo(12, -10);
+    ctx.lineTo(9, -32);
+    ctx.lineTo(-9, -32);
+    ctx.closePath();
+    ctx.fill();
+
+    // Belt
+    ctx.fillStyle = '#4a3420';
+    ctx.fillRect(-11, -17, 22, 4);
+    ctx.fillStyle = '#f2c14e';
+    ctx.fillRect(-2, -17, 4, 4);
+
+    // Arms
+    ctx.fillStyle = '#2a5f33';
+    const armSwing = moving ? -swing * 5 : (g.onGround ? 0 : -8);
+    ctx.save();
+    ctx.translate(-9, -28);
+    ctx.rotate((armSwing * Math.PI) / 60);
+    ctx.fillRect(-3, 0, 6, 13);
+    ctx.fillStyle = '#f0c8a0';
+    ctx.beginPath(); ctx.arc(0, 14, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    // Head
+    ctx.fillStyle = '#f0c8a0';
+    ctx.beginPath(); ctx.arc(1, -38, 8, 0, Math.PI * 2); ctx.fill();
+
+    // Beard
+    ctx.fillStyle = '#ece6da';
+    ctx.beginPath();
+    ctx.moveTo(-6, -38);
+    ctx.quadraticCurveTo(-4, -18, 4, -20);
+    ctx.quadraticCurveTo(10, -24, 9, -38);
+    ctx.closePath();
+    ctx.fill();
+
+    // Nose
+    ctx.fillStyle = '#e09a7a';
+    ctx.beginPath(); ctx.arc(8, -38, 3.2, 0, Math.PI * 2); ctx.fill();
+
+    // Eye
+    ctx.fillStyle = '#1a1a1a';
+    ctx.beginPath(); ctx.arc(5, -41, 1.3, 0, Math.PI * 2); ctx.fill();
+
+    // Hat (droops back with speed)
+    const droop = Math.max(-1, Math.min(1, -g.vx * g.facing / MAX_SPEED)) * 8 + (g.vy < 0 ? 6 : 0);
+    ctx.fillStyle = '#b8322a';
+    ctx.beginPath();
+    ctx.moveTo(-9, -42);
+    ctx.lineTo(11, -42);
+    ctx.quadraticCurveTo(4, -56, -4 + droop, -68);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#8f241e';
+    ctx.fillRect(-10, -44, 22, 4);
+
+    ctx.restore();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Update
+  // ---------------------------------------------------------------------------
+  let time = 0;
+
+  function update(dt) {
+    time += dt;
+    const g = gnome;
+    const gy = groundY();
+
+    // Horizontal movement
+    const dir = (right() ? 1 : 0) - (left() ? 1 : 0);
+    const control = g.onGround ? 1 : AIR_CONTROL;
+    if (dir !== 0) {
+      g.vx += dir * MOVE_ACCEL * control * dt;
+      g.facing = dir;
+    } else if (g.onGround) {
+      const dec = FRICTION * dt;
+      g.vx = Math.abs(g.vx) <= dec ? 0 : g.vx - Math.sign(g.vx) * dec;
+    }
+    g.vx = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, g.vx));
+
+    // Jumping with coyote time + input buffering
+    if (g.onGround) g.lastGrounded = time;
+    const buffered = (performance.now() - jumpPressedAt) / 1000 < JUMP_BUFFER;
+    if (buffered && time - g.lastGrounded < COYOTE_TIME) {
+      g.vy = -JUMP_VEL;
+      g.onGround = false;
+      g.lastGrounded = -Infinity;
+      jumpPressedAt = -Infinity;
+      g.squash = 1.25;
+    }
+
+    // Variable jump height: release early for a short hop
+    if (!jumpHeld() && g.vy < 0) g.vy += GRAVITY * 1.6 * dt;
+    g.vy += GRAVITY * dt;
+
+    g.x += g.vx * dt;
+    g.y += g.vy * dt;
+
+    // Ground collision
+    if (g.y >= gy) {
+      if (!g.onGround && g.vy > 300) g.squash = 0.75;
+      g.y = gy;
+      g.vy = 0;
+      g.onGround = true;
+    } else {
+      g.onGround = false;
+    }
+
+    // Ease squash back to 1
+    g.squash += (1 - g.squash) * Math.min(1, dt * 12);
+
+    if (g.onGround && Math.abs(g.vx) > 10) g.walkPhase += dt * Math.abs(g.vx) * 0.05;
+
+    // Camera: gnome stays within a dead zone around the centre
+    const target = g.x - W / 2;
+    const diff = target - camera.x;
+    if (diff > DEAD_ZONE) camera.x += (diff - DEAD_ZONE) * Math.min(1, dt * 8);
+    else if (diff < -DEAD_ZONE) camera.x += (diff + DEAD_ZONE) * Math.min(1, dt * 8);
+
+    distEl.textContent = Math.round(g.x / 40);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
+  function render() {
+    const gy = groundY();
+
+    // Deep cavern backdrop
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, '#07050c');
+    bg.addColorStop(0.5, '#140e22');
+    bg.addColorStop(1, '#1f1630');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    for (let i = 0; i < layers.length; i++) {
+      const L = layers[i];
+      if (L.stalactite) drawCeiling(L);
+      drawRidge(L, gy);
+      if (i === 1) drawCrystals(0.25, 77, gy);
+    }
+
+    // Atmospheric haze between background and playfield
+    ctx.fillStyle = 'rgba(20, 12, 30, 0.25)';
+    ctx.fillRect(0, 0, W, H);
+
+    drawGround(gy);
+    drawGnome(gnome.x - camera.x, gnome.y);
+    drawDust();
+
+    // Vignette
+    const v = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
+    v.addColorStop(0, 'rgba(0,0,0,0)');
+    v.addColorStop(1, 'rgba(0,0,0,0.65)');
+    ctx.fillStyle = v;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Main loop
+  // ---------------------------------------------------------------------------
+  camera.x = gnome.x - W / 2;
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    update(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
