@@ -13,32 +13,69 @@
     font-family: "Trebuchet MS", "Segoe UI", sans-serif;
     color: #e8dcc0;
   }
-  canvas { display: block; width: 100vw; height: 100vh; image-rendering: auto; }
+  canvas#game { display: block; width: 100vw; height: 100vh; }
   #hud {
     position: fixed; top: 14px; left: 16px;
     pointer-events: none;
     text-shadow: 0 2px 4px #000;
+    max-width: calc(100vw - 280px);
   }
-  #hud h1 {
-    font-size: 22px; letter-spacing: 2px;
-    color: #f2c14e;
-  }
+  #hud h1 { font-size: 22px; letter-spacing: 2px; color: #f2c14e; }
   #hud h1 span { color: #c9b28a; font-size: 15px; letter-spacing: 1px; }
   #hud p { font-size: 13px; opacity: 0.8; margin-top: 4px; }
-  #depth {
+
+  #mapPanel {
     position: fixed; top: 14px; right: 16px;
-    font-size: 14px; text-shadow: 0 2px 4px #000;
-    pointer-events: none; text-align: right;
+    background: rgba(14, 10, 22, 0.82);
+    border: 1px solid #5a4632;
+    border-radius: 8px;
+    padding: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(242,193,78,0.08);
+    pointer-events: none;
   }
+  #mapPanel .title {
+    display: flex; justify-content: space-between; gap: 12px;
+    font-size: 11px; letter-spacing: 2px; color: #f2c14e;
+    margin-bottom: 6px;
+  }
+  #mapPanel .title span { color: #8c7a5c; letter-spacing: 1px; }
+  #minimap { display: block; border-radius: 4px; }
+  #mapInfo { font-size: 11px; color: #c9b28a; margin-top: 6px; line-height: 1.5; }
+
+  #overlay {
+    position: fixed; inset: 0;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(5, 3, 10, 0.6);
+    text-align: center;
+  }
+  #overlay.show { display: flex; }
+  #overlay div {
+    padding: 28px 36px; border-radius: 10px;
+    background: rgba(20, 14, 30, 0.92);
+    border: 1px solid #f2c14e;
+    box-shadow: 0 0 40px rgba(242,193,78,0.25);
+  }
+  #overlay h2 { color: #f2c14e; letter-spacing: 2px; margin-bottom: 8px; }
+  #overlay p { opacity: 0.85; }
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
 <div id="hud">
   <h1>GNOME DEEP <span>: Maze of Greed</span></h1>
-  <p>A / D or ← / → to walk &nbsp;·&nbsp; W / ↑ / Space to jump</p>
+  <p>A / D or ← / → to walk &nbsp;·&nbsp; Space (or W / ↑) to jump</p>
+  <p>At a ladder junction: W / ↑ to climb up, S / ↓ to climb down, or keep walking straight</p>
 </div>
-<div id="depth">Distance: <b id="dist">0</b> m</div>
+<div id="mapPanel">
+  <div class="title">MINIMAP <span>[M] resize</span></div>
+  <canvas id="minimap"></canvas>
+  <div id="mapInfo"></div>
+</div>
+<div id="overlay"><div>
+  <h2>EXIT FOUND!</h2>
+  <p id="overlayText"></p>
+  <p style="margin-top:10px">Press <b>Enter</b> to descend into the next mine</p>
+</div></div>
 
 <script>
 (() => {
@@ -49,56 +86,219 @@
   // ---------------------------------------------------------------------------
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
-  const distEl = document.getElementById('dist');
+  const rockCanvas = document.createElement('canvas');   // offscreen: rock with tunnels carved out
+  const rctx = rockCanvas.getContext('2d');
+  const mapCanvas = document.getElementById('minimap');
+  const mctx = mapCanvas.getContext('2d');
+  const mapInfoEl = document.getElementById('mapInfo');
+  const overlayEl = document.getElementById('overlay');
+  const overlayTextEl = document.getElementById('overlayText');
   let W = 0, H = 0, DPR = 1;
+  let mapBig = false, MW = 220, MH = 160;
 
   function resize() {
     DPR = Math.min(window.devicePixelRatio || 1, 2);
     W = window.innerWidth;
     H = window.innerHeight;
-    canvas.width = Math.floor(W * DPR);
-    canvas.height = Math.floor(H * DPR);
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    for (const [c, cx] of [[canvas, ctx], [rockCanvas, rctx]]) {
+      c.width = Math.floor(W * DPR);
+      c.height = Math.floor(H * DPR);
+      cx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    }
+    sizeMinimap();
   }
-  window.addEventListener('resize', resize);
-  resize();
+
+  function sizeMinimap() {
+    MW = mapBig ? Math.floor(Math.min(560, W * 0.5)) : Math.floor(Math.min(220, W * 0.4));
+    MH = mapBig ? Math.floor(Math.min(420, H * 0.6)) : Math.floor(Math.min(160, H * 0.3));
+    mapCanvas.width = Math.floor(MW * DPR);
+    mapCanvas.height = Math.floor(MH * DPR);
+    mapCanvas.style.width = MW + 'px';
+    mapCanvas.style.height = MH + 'px';
+    mctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
 
   // ---------------------------------------------------------------------------
   // Input
   // ---------------------------------------------------------------------------
   const keys = new Set();
-  const JUMP_KEYS = ['KeyW', 'ArrowUp', 'Space'];
-  let jumpPressedAt = -Infinity;
+  const pressedAt = { jump: -Infinity, up: -Infinity, down: -Infinity };
+  const INPUT_BUFFER = 0.12;
 
   window.addEventListener('keydown', e => {
     if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
-    if (JUMP_KEYS.includes(e.code) && !keys.has(e.code)) jumpPressedAt = performance.now();
+    if (!keys.has(e.code)) {
+      const now = performance.now();
+      if (e.code === 'Space') pressedAt.jump = now;
+      if (e.code === 'KeyW' || e.code === 'ArrowUp') pressedAt.up = now;
+      if (e.code === 'KeyS' || e.code === 'ArrowDown') pressedAt.down = now;
+      if (e.code === 'KeyM') { mapBig = !mapBig; sizeMinimap(); }
+      if (e.code === 'Enter' && won) nextMine();
+    }
     keys.add(e.code);
   });
   window.addEventListener('keyup', e => keys.delete(e.code));
   window.addEventListener('blur', () => keys.clear());
 
-  const left  = () => keys.has('KeyA') || keys.has('ArrowLeft');
-  const right = () => keys.has('KeyD') || keys.has('ArrowRight');
-  const jumpHeld = () => JUMP_KEYS.some(k => keys.has(k));
+  const left     = () => keys.has('KeyA') || keys.has('ArrowLeft');
+  const right    = () => keys.has('KeyD') || keys.has('ArrowRight');
+  const upHeld   = () => keys.has('KeyW') || keys.has('ArrowUp');
+  const downHeld = () => keys.has('KeyS') || keys.has('ArrowDown');
+  const jumpHeld = () => keys.has('Space') || upHeld();
+  const fresh = t => (performance.now() - t) / 1000 < INPUT_BUFFER;
 
   // ---------------------------------------------------------------------------
-  // Deterministic noise — lets the world generate endlessly in both directions
+  // Noise for decorative background (not seed dependent)
   // ---------------------------------------------------------------------------
-  function hash(n, seed) {
-    let h = (n * 374761393 + seed * 668265263) | 0;
+  function hash(n, salt) {
+    let h = (n * 374761393 + salt * 668265263) | 0;
     h = Math.imul(h ^ (h >>> 13), 1274126177);
     h ^= h >>> 16;
     return (h >>> 0) / 4294967296;
   }
-  function smoothNoise(x, seed) {
+  function smoothNoise(x, salt) {
     const i = Math.floor(x), f = x - i;
     const t = f * f * (3 - 2 * f);
-    return hash(i, seed) * (1 - t) + hash(i + 1, seed) * t;
+    return hash(i, salt) * (1 - t) + hash(i + 1, salt) * t;
   }
 
   // ---------------------------------------------------------------------------
-  // World constants
+  // Seeded randomness — every value is a pure function of (seed, coordinates),
+  // so a seed always yields the same mine regardless of exploration order.
+  // ---------------------------------------------------------------------------
+  function mix(h) {
+    h = Math.imul(h ^ (h >>> 16), 0x7feb352d);
+    h = Math.imul(h ^ (h >>> 15), 0x846ca68b);
+    return (h ^ (h >>> 16)) >>> 0;
+  }
+  function rnd(a, b, salt) {
+    let h = mix(seed ^ 0x9e3779b9);
+    h = mix(h + Math.imul(a | 0, 0x27d4eb2d));
+    h = mix(h + Math.imul(b | 0, 0x165667b1));
+    h = mix(h + salt);
+    return h / 4294967296;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mine layout
+  //
+  // The mine is a grid: each column `s` is a tunnel segment CW pixels wide, and
+  // each row is a tunnel level RH pixels apart. Junction `j` sits at x = j*CW,
+  // between segments j-1 and j. A junction can hold a ladder shaft linking row
+  // r to row r+1. Segments may be caved in (closed), forming dead ends.
+  //
+  // A guaranteed "spine" random walk (one open row per column, plus shafts
+  // wherever it changes level) ensures the exit is always reachable.
+  // ---------------------------------------------------------------------------
+  const CW = 900;          // segment width
+  const RH = 380;          // vertical distance between tunnel floors
+  const TUN_H = 220;       // tunnel height
+  const ROOM_HALF = 70;    // half-width of the chamber at a junction
+  const SHAFT_HALF = 34;   // half-width of a ladder shaft
+  const START_ROW = 2;
+  const CHUNK_ROWS = 8;    // rows per generated chunk
+  const OPEN_CHANCE = 0.6;
+  const SHAFT_CHANCE = 0.3;
+
+  let seed = 0, mineNo = 1;
+  let spineCache, chunks, explored, exit;
+
+  function spineStep(cx) {
+    const r = rnd(cx, 0, 1);
+    return r < 0.28 ? -1 : r < 0.6 ? 1 : 0;   // slight downward bias — we're going deep
+  }
+  function spineRow(cx) {
+    if (spineCache.has(cx)) return spineCache.get(cx);
+    const towardZero = cx > 0 ? -1 : 1;
+    let k = cx;
+    while (!spineCache.has(k)) k += towardZero;
+    let row = spineCache.get(k);
+    while (k !== cx) {
+      k -= towardZero;
+      row = Math.max(0, row + spineStep(k));
+      spineCache.set(k, row);
+    }
+    return row;
+  }
+
+  // A chunk = one column of segments (and its left junction) for CHUNK_ROWS rows.
+  function genChunk(cx, rb) {
+    const segs = new Uint8Array(CHUNK_ROWS);
+    const shafts = new Uint8Array(CHUNK_ROWS);
+    const sp = spineRow(cx), prev = spineRow(cx - 1);
+    const spineShaft = sp !== prev ? Math.min(sp, prev) : -1;
+    for (let i = 0; i < CHUNK_ROWS; i++) {
+      const row = rb * CHUNK_ROWS + i;
+      if (row < 0) continue;
+      segs[i] = row === sp || rnd(cx, row, 2) < OPEN_CHANCE ? 1 : 0;
+      shafts[i] = row === spineShaft || rnd(cx, row, 3) < SHAFT_CHANCE ? 1 : 0;
+    }
+    return { cx, segs, shafts };
+  }
+  function getChunk(cx, rb) {
+    const key = cx + ',' + rb;
+    let c = chunks.get(key);
+    if (!c) { c = genChunk(cx, rb); chunks.set(key, c); }
+    return c;
+  }
+  function segOpen(s, row) {
+    if (row < 0) return false;
+    const rb = Math.floor(row / CHUNK_ROWS);
+    return getChunk(s, rb).segs[row - rb * CHUNK_ROWS] === 1;
+  }
+  // Ladder shaft at junction j from `row` down to `row + 1`
+  function shaftAt(j, row) {
+    if (row < 0) return false;
+    const rb = Math.floor(row / CHUNK_ROWS);
+    return getChunk(j, rb).shafts[row - rb * CHUNK_ROWS] === 1;
+  }
+  function roomAt(j, row) {
+    return segOpen(j - 1, row) || segOpen(j, row) || shaftAt(j, row) || shaftAt(j, row - 1);
+  }
+  function isCarved(x, row) {
+    if (segOpen(Math.floor(x / CW), row)) return true;
+    const j = Math.round(x / CW);
+    return Math.abs(x - j * CW) <= ROOM_HALF && roomAt(j, row);
+  }
+
+  function initMine(newSeed) {
+    seed = newSeed >>> 0;
+    spineCache = new Map([[0, START_ROW]]);
+    chunks = new Map();
+    explored = new Set();
+    const exitCx = 12 + Math.floor(rnd(0, 0, 9) * 8);
+    exit = { cx: exitCx, row: spineRow(exitCx), x: exitCx * CW + CW / 2 };
+
+    Object.assign(gnome, {
+      x: CW / 2, row: START_ROW, y: START_ROW * RH, vx: 0, vy: 0,
+      facing: 1, onGround: true, lastGrounded: 0, climb: null, squash: 1,
+    });
+    camera.x = gnome.x - W / 2;
+    camera.y = gnome.y - H * 0.62;
+
+    try {
+      const u = new URL(location.href);
+      u.searchParams.set('seed', seed);
+      history.replaceState(null, '', u);
+    } catch (_) { /* file:// or sandboxed — seed still shown in the panel */ }
+  }
+
+  function nextMine() {
+    won = false;
+    overlayEl.classList.remove('show');
+    mineNo++;
+    initMine(mix(seed + 1));
+  }
+
+  // Drop chunks far from the gnome so memory stays bounded on endless walks
+  function evictChunks() {
+    if (chunks.size < 600) return;
+    const gs = Math.floor(gnome.x / CW);
+    for (const [key, c] of chunks) if (Math.abs(c.cx - gs) > 30) chunks.delete(key);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Physics constants
   // ---------------------------------------------------------------------------
   const GRAVITY = 2200;
   const MOVE_ACCEL = 2600;
@@ -107,31 +307,177 @@
   const AIR_CONTROL = 0.6;
   const JUMP_VEL = 780;
   const COYOTE_TIME = 0.1;
-  const JUMP_BUFFER = 0.12;
-  const groundY = () => H * 0.78;
+  const CLIMB_SPEED = 420;
+  const GNOME_HALF_W = 14;
+  const GNOME_TOP = 70;   // feet to hat tip
 
-  // ---------------------------------------------------------------------------
-  // Gnome
-  // ---------------------------------------------------------------------------
   const gnome = {
-    x: 0, y: 0, vx: 0, vy: 0,
-    w: 30, h: 54,
-    facing: 1,
-    onGround: true,
-    lastGrounded: 0,
-    walkPhase: 0,
-    squash: 1,
+    x: 0, y: 0, row: 0, vx: 0, vy: 0,
+    facing: 1, onGround: true, lastGrounded: 0,
+    walkPhase: 0, squash: 1, climb: null,
   };
-  gnome.y = groundY();
 
-  // ---------------------------------------------------------------------------
-  // Camera — keeps the gnome near screen centre with a small dead zone
-  // ---------------------------------------------------------------------------
-  const camera = { x: 0 };
+  // Camera keeps the gnome near screen centre with a small horizontal dead zone
+  const camera = { x: 0, y: 0 };
   const DEAD_ZONE = 40;
 
+  let time = 0;
+  let won = false;
+
   // ---------------------------------------------------------------------------
-  // Parallax layers (factor: 0 = static, 1 = moves with world)
+  // Update
+  // ---------------------------------------------------------------------------
+  function junctionInfo() {
+    const g = gnome;
+    const j = Math.round(g.x / CW);
+    const near = Math.abs(g.x - j * CW) <= ROOM_HALF - 10;
+    return { j, canUp: near && shaftAt(j, g.row - 1), canDown: near && shaftAt(j, g.row) };
+  }
+
+  function startClimb(j, targetRow) {
+    Object.assign(gnome, { climb: { j, targetRow }, vx: 0, vy: 0, onGround: false });
+  }
+
+  function updateClimb(dt) {
+    const g = gnome, c = g.climb;
+    const dx = c.j * CW - g.x;
+    g.x += Math.max(-300 * dt, Math.min(300 * dt, dx));
+    const ty = c.targetRow * RH, dy = ty - g.y, step = CLIMB_SPEED * dt;
+    g.y += Math.abs(dy) <= step ? dy : Math.sign(dy) * step;
+    g.walkPhase += dt * 10;
+    if (g.y === ty) {
+      g.row = c.targetRow;
+      g.climb = null;
+      g.onGround = true;
+      g.lastGrounded = time;
+    }
+  }
+
+  const bodyFits = x => isCarved(x - GNOME_HALF_W, gnome.row) && isCarved(x + GNOME_HALF_W, gnome.row);
+
+  function updateWalk(dt) {
+    const g = gnome;
+    const floor = g.row * RH;
+
+    // Route choice at junctions: up/down ladders, or keep walking straight
+    if (g.onGround) {
+      const jn = junctionInfo();
+      if (jn.canUp && (fresh(pressedAt.up) || upHeld())) {
+        pressedAt.up = -Infinity;
+        return startClimb(jn.j, g.row - 1);
+      }
+      if (jn.canDown && (fresh(pressedAt.down) || downHeld())) {
+        pressedAt.down = -Infinity;
+        return startClimb(jn.j, g.row + 1);
+      }
+    }
+
+    // Horizontal movement
+    const dir = (right() ? 1 : 0) - (left() ? 1 : 0);
+    const control = g.onGround ? 1 : AIR_CONTROL;
+    if (dir !== 0) {
+      g.vx += dir * MOVE_ACCEL * control * dt;
+      g.facing = dir;
+    } else if (g.onGround) {
+      const dec = FRICTION * dt;
+      g.vx = Math.abs(g.vx) <= dec ? 0 : g.vx - Math.sign(g.vx) * dec;
+    }
+    g.vx = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, g.vx));
+
+    // Jumping with coyote time + input buffering (W/Up jumps when there's no ladder)
+    if (g.onGround) g.lastGrounded = time;
+    if ((fresh(pressedAt.jump) || fresh(pressedAt.up)) && time - g.lastGrounded < COYOTE_TIME) {
+      g.vy = -JUMP_VEL;
+      g.onGround = false;
+      g.lastGrounded = -Infinity;
+      pressedAt.jump = pressedAt.up = -Infinity;
+      g.squash = 1.25;
+    }
+
+    // Variable jump height: release early for a short hop
+    if (!jumpHeld() && g.vy < 0) g.vy += GRAVITY * 1.6 * dt;
+    g.vy += GRAVITY * dt;
+
+    // Move horizontally, stopping flush against cave-ins and dead ends
+    const nx = g.x + g.vx * dt;
+    if (bodyFits(nx)) {
+      g.x = nx;
+    } else {
+      const s = Math.sign(nx - g.x);
+      while (Math.abs(nx - g.x) >= 1 && bodyFits(g.x + s)) g.x += s;
+      g.vx = 0;
+    }
+
+    g.y += g.vy * dt;
+
+    // Ceiling
+    const ceil = floor - TUN_H;
+    if (g.y - GNOME_TOP < ceil) { g.y = ceil + GNOME_TOP; g.vy = Math.max(0, g.vy); }
+
+    // Floor
+    if (g.y >= floor) {
+      if (!g.onGround && g.vy > 300) g.squash = 0.75;
+      g.y = floor;
+      g.vy = 0;
+      g.onGround = true;
+    } else {
+      g.onGround = false;
+    }
+
+    if (g.onGround && Math.abs(g.vx) > 10) g.walkPhase += dt * Math.abs(g.vx) * 0.05;
+  }
+
+  function markExplored() {
+    const s0 = Math.floor(camera.x / CW), s1 = Math.floor((camera.x + W) / CW);
+    const r0 = Math.max(0, Math.floor(camera.y / RH)), r1 = Math.floor((camera.y + H + TUN_H) / RH);
+    for (let row = r0; row <= r1; row++) {
+      const floor = row * RH;
+      if (floor < camera.y || floor - TUN_H > camera.y + H) continue;
+      for (let s = s0; s <= s1; s++) if (segOpen(s, row)) explored.add('s' + s + ',' + row);
+    }
+    for (let row = Math.max(0, r0 - 1); row <= r1; row++) {
+      if ((row + 1) * RH < camera.y || row * RH > camera.y + H) continue;
+      for (let j = s0; j <= s1 + 1; j++) {
+        const x = j * CW;
+        if (x < camera.x - SHAFT_HALF || x > camera.x + W + SHAFT_HALF) continue;
+        if (shaftAt(j, row)) explored.add('j' + j + ',' + row);
+      }
+    }
+  }
+
+  let lastInfo = '';
+  function update(dt) {
+    time += dt;
+    const g = gnome;
+
+    if (!won) {
+      if (g.climb) updateClimb(dt);
+      else updateWalk(dt);
+    }
+
+    g.squash += (1 - g.squash) * Math.min(1, dt * 12);
+
+    // Camera
+    const diff = g.x - W / 2 - camera.x;
+    if (diff > DEAD_ZONE) camera.x += (diff - DEAD_ZONE) * Math.min(1, dt * 8);
+    else if (diff < -DEAD_ZONE) camera.x += (diff + DEAD_ZONE) * Math.min(1, dt * 8);
+    camera.y += (g.y - H * 0.62 - camera.y) * Math.min(1, dt * 6);
+
+    markExplored();
+    evictChunks();
+
+    if (!won && !g.climb && g.row === exit.row && Math.abs(g.x - exit.x) < 40) {
+      won = true;
+      overlayTextEl.textContent = `You escaped mine #${mineNo} at a depth of ${g.row * 12} m.`;
+      overlayEl.classList.add('show');
+    }
+
+    const info = `Mine #${mineNo} · Depth ${Math.round(g.y / RH * 12)} m<br>Seed ${seed}`;
+    if (info !== lastInfo) { mapInfoEl.innerHTML = info; lastInfo = info; }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Parallax cavern background (factor: 0 = static, 1 = moves with world)
   // ---------------------------------------------------------------------------
   const layers = [
     { factor: 0.08, seed: 11, seg: 260, base: 0.30, amp: 0.22, color: '#1d1530', stalactite: true },
@@ -140,8 +486,7 @@
     { factor: 0.55, seed: 51, seg: 120, base: 0.66, amp: 0.10, color: '#40305a', stalactite: false },
   ];
 
-  // Ridge silhouette rising from the floor
-  function drawRidge(layer, gy) {
+  function drawRidge(layer) {
     const off = camera.x * layer.factor;
     const step = 12;
     ctx.fillStyle = layer.color;
@@ -150,15 +495,13 @@
     for (let sx = -step; sx <= W + step; sx += step) {
       const wx = (sx + off) / layer.seg;
       const n = smoothNoise(wx, layer.seed) * 0.7 + smoothNoise(wx * 3.1, layer.seed + 5) * 0.3;
-      const y = H * layer.base + (1 - n) * H * layer.amp;
-      ctx.lineTo(sx, Math.min(y, gy + 10));
+      ctx.lineTo(sx, H * layer.base + (1 - n) * H * layer.amp);
     }
     ctx.lineTo(W + step, H);
     ctx.closePath();
     ctx.fill();
   }
 
-  // Ceiling with stalactites hanging down
   function drawCeiling(layer) {
     const off = camera.x * layer.factor;
     const step = 12;
@@ -174,13 +517,11 @@
     ctx.closePath();
     ctx.fill();
 
-    // Individual stalactites placed per world cell
     const cell = 70;
     const first = Math.floor((off - cell) / cell);
     const last = Math.ceil((off + W + cell) / cell);
     for (let i = first; i <= last; i++) {
-      const r = hash(i, layer.seed + 7);
-      if (r < 0.45) continue;
+      if (hash(i, layer.seed + 7) < 0.45) continue;
       const sx = i * cell - off + hash(i, layer.seed + 3) * cell;
       const len = (0.05 + hash(i, layer.seed + 4) * 0.12) * H * (0.6 + layer.factor);
       const wid = 8 + hash(i, layer.seed + 8) * 18;
@@ -195,18 +536,17 @@
     }
   }
 
-  // Glowing crystals on mid layer for atmosphere
-  function drawCrystals(factor, seed, gy) {
+  function drawCrystals(factor, salt) {
     const off = camera.x * factor;
     const cell = 180;
     const first = Math.floor((off - cell) / cell);
     const last = Math.ceil((off + W + cell) / cell);
     for (let i = first; i <= last; i++) {
-      if (hash(i, seed) < 0.6) continue;
-      const sx = i * cell - off + hash(i, seed + 1) * cell;
-      const sy = H * (0.6 + hash(i, seed + 2) * 0.1);
-      const hue = hash(i, seed + 3) < 0.5 ? 190 : 280;
-      const s = 6 + hash(i, seed + 4) * 8;
+      if (hash(i, salt) < 0.6) continue;
+      const sx = i * cell - off + hash(i, salt + 1) * cell;
+      const sy = H * (0.6 + hash(i, salt + 2) * 0.1);
+      const hue = hash(i, salt + 3) < 0.5 ? 190 : 280;
+      const s = 6 + hash(i, salt + 4) * 8;
       const pulse = 0.6 + 0.4 * Math.sin(time * 2 + i);
       const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, s * 5);
       g.addColorStop(0, `hsla(${hue}, 90%, 70%, ${0.35 * pulse})`);
@@ -224,44 +564,69 @@
     }
   }
 
-  // Foreground ground strip (factor 1 — locked to the world)
-  function drawGround(gy) {
-    const off = camera.x;
-    const grd = ctx.createLinearGradient(0, gy, 0, H);
-    grd.addColorStop(0, '#5a4632');
-    grd.addColorStop(0.15, '#3d2f22');
-    grd.addColorStop(1, '#1a130d');
-    ctx.fillStyle = grd;
-    ctx.fillRect(0, gy, W, H - gy);
+  // ---------------------------------------------------------------------------
+  // Mine rendering
+  // ---------------------------------------------------------------------------
+  function visibleRange() {
+    return {
+      s0: Math.floor(camera.x / CW) - 1,
+      s1: Math.floor((camera.x + W) / CW) + 1,
+      r0: Math.max(0, Math.floor(camera.y / RH) - 1),
+      r1: Math.floor((camera.y + H + TUN_H) / RH) + 1,
+    };
+  }
 
-    // Moss edge
-    ctx.fillStyle = '#4c6b3a';
-    ctx.fillRect(0, gy - 2, W, 4);
+  function drawRock() {
+    const { s0, s1, r0, r1 } = visibleRange();
+    rctx.save();
+    rctx.globalCompositeOperation = 'source-over';
+    rctx.fillStyle = '#2a2019';
+    rctx.fillRect(0, 0, W, H);
 
-    // Pebbles & embedded stones
-    const cell = 46;
-    const first = Math.floor((off - cell) / cell);
-    const last = Math.ceil((off + W + cell) / cell);
-    for (let i = first; i <= last; i++) {
-      const sx = i * cell - off + hash(i, 501) * cell;
-      const sy = gy + 10 + hash(i, 502) * (H - gy - 20);
-      const r = 2 + hash(i, 503) * 6;
-      ctx.fillStyle = hash(i, 504) < 0.5 ? '#2a2018' : '#6a5440';
-      ctx.beginPath();
-      ctx.ellipse(sx, sy, r * 1.4, r, 0, 0, Math.PI * 2);
-      ctx.fill();
+    // World-locked stones embedded in the rock
+    const cell = 64;
+    const ix0 = Math.floor(camera.x / cell) - 1, ix1 = Math.floor((camera.x + W) / cell) + 1;
+    const iy0 = Math.floor(camera.y / cell) - 1, iy1 = Math.floor((camera.y + H) / cell) + 1;
+    for (let ix = ix0; ix <= ix1; ix++) {
+      for (let iy = iy0; iy <= iy1; iy++) {
+        const r = rnd(ix, iy, 50);
+        if (r < 0.45) continue;
+        const sx = ix * cell - camera.x + rnd(ix, iy, 51) * cell;
+        const sy = iy * cell - camera.y + rnd(ix, iy, 52) * cell;
+        const sz = 3 + rnd(ix, iy, 53) * 10;
+        rctx.fillStyle = r < 0.75 ? '#211912' : '#3a2d22';
+        rctx.beginPath();
+        rctx.ellipse(sx, sy, sz * 1.4, sz, 0, 0, Math.PI * 2);
+        rctx.fill();
+      }
     }
 
-    // Mushrooms on the surface
-    const mcell = 140;
-    const mf = Math.floor((off - mcell) / mcell);
-    const ml = Math.ceil((off + W + mcell) / mcell);
-    for (let i = mf; i <= ml; i++) {
-      if (hash(i, 601) < 0.55) continue;
-      const sx = i * mcell - off + hash(i, 602) * mcell;
-      const s = 0.6 + hash(i, 603) * 0.8;
-      drawMushroom(sx, gy, s, hash(i, 604) < 0.5 ? '#c0392b' : '#8e44ad');
+    // Carve out tunnels, junction chambers and shafts
+    rctx.globalCompositeOperation = 'destination-out';
+    rctx.fillStyle = '#000';
+    for (let row = r0; row <= r1; row++) {
+      const fy = row * RH - camera.y;
+      for (let s = s0; s <= s1; s++) {
+        if (!segOpen(s, row)) continue;
+        const x0 = s * CW, x1 = x0 + CW;
+        rctx.beginPath();
+        rctx.moveTo(x0 - camera.x, fy);
+        for (let wx = x0; wx <= x1; wx += 30) {
+          const bump = smoothNoise(wx / 140, row * 7 + 3) * 28;   // ceiling only ever carved upward
+          rctx.lineTo(wx - camera.x, fy - TUN_H - bump);
+        }
+        rctx.lineTo(x1 - camera.x, fy);
+        rctx.closePath();
+        rctx.fill();
+      }
+      for (let j = s0; j <= s1 + 1; j++) {
+        const jx = j * CW - camera.x;
+        if (roomAt(j, row)) rctx.fillRect(jx - ROOM_HALF, fy - TUN_H - 10, ROOM_HALF * 2, TUN_H + 10);
+        if (shaftAt(j, row)) rctx.fillRect(jx - SHAFT_HALF, fy - 2, SHAFT_HALF * 2, RH - TUN_H + 4);
+      }
     }
+    rctx.restore();
+    ctx.drawImage(rockCanvas, 0, 0, W, H);
   }
 
   function drawMushroom(x, y, s, cap) {
@@ -276,7 +641,129 @@
     ctx.beginPath(); ctx.arc(x + 3 * s, y - 12 * s, 1.1 * s, 0, Math.PI * 2); ctx.fill();
   }
 
-  // Floating dust motes (nearest layer, slightly faster than world)
+  function drawTimber(x, fy, lantern) {
+    const top = fy - TUN_H + 14;
+    ctx.fillStyle = '#5b3d22';
+    ctx.fillRect(x - 55, top, 10, TUN_H - 14);
+    ctx.fillRect(x + 45, top, 10, TUN_H - 14);
+    ctx.fillStyle = '#6e4a2a';
+    ctx.fillRect(x - 62, top - 4, 124, 12);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillRect(x - 62, top + 6, 124, 2);
+    if (lantern) {
+      const ly = top + 30, flick = 0.85 + 0.15 * Math.sin(time * 9 + x);
+      const g = ctx.createRadialGradient(x, ly, 0, x, ly, 140);
+      g.addColorStop(0, `rgba(255, 190, 90, ${0.32 * flick})`);
+      g.addColorStop(1, 'rgba(255, 190, 90, 0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(x - 140, ly - 140, 280, 280);
+      ctx.strokeStyle = '#2a2018';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x, top + 8); ctx.lineTo(x, ly - 8); ctx.stroke();
+      ctx.fillStyle = '#2a2018';
+      ctx.fillRect(x - 6, ly - 8, 12, 16);
+      ctx.fillStyle = `rgba(255, 210, 120, ${flick})`;
+      ctx.fillRect(x - 4, ly - 5, 8, 10);
+    }
+  }
+
+  function drawLadder(x, yTop, yBot) {
+    ctx.fillStyle = '#7a5532';
+    ctx.fillRect(x - 16, yTop, 5, yBot - yTop);
+    ctx.fillRect(x + 11, yTop, 5, yBot - yTop);
+    ctx.fillStyle = '#8f6a42';
+    for (let y = yBot - 14; y > yTop; y -= 22) ctx.fillRect(x - 13, y, 26, 4);
+  }
+
+  function drawHatch(x, fy) {
+    ctx.fillStyle = '#4a3420';
+    ctx.fillRect(x - SHAFT_HALF - 6, fy - 3, SHAFT_HALF * 2 + 12, 7);
+    ctx.fillStyle = '#6e4a2a';
+    for (let px = x - SHAFT_HALF - 4; px < x + SHAFT_HALF + 4; px += 12) ctx.fillRect(px, fy - 3, 8, 6);
+  }
+
+  function drawMineDetails() {
+    const { s0, s1, r0, r1 } = visibleRange();
+    for (let row = r0; row <= r1; row++) {
+      const fy = row * RH - camera.y;
+      for (let s = s0; s <= s1; s++) {
+        if (!segOpen(s, row)) continue;
+        const x0 = s * CW - camera.x;
+        ctx.fillStyle = '#4c6b3a';
+        ctx.fillRect(x0, fy - 2, CW, 4);
+        for (let k = 0; k < 3; k++) {
+          if (rnd(s, row, 20 + k) < 0.65) drawTimber(x0 + 150 + k * 300, fy, rnd(s, row, 30 + k) < 0.4);
+        }
+        for (let m = 0; m < 6; m++) {
+          if (rnd(s, row, 40 + m) > 0.35) continue;
+          const mx = x0 + 100 + m * 120 + rnd(s, row, 46 + m) * 60;
+          drawMushroom(mx, fy, 0.6 + rnd(s, row, 52 + m) * 0.8, rnd(s, row, 58 + m) < 0.5 ? '#c0392b' : '#8e44ad');
+        }
+      }
+      for (let j = s0; j <= s1 + 1; j++) {
+        const jx = j * CW - camera.x;
+        if (roomAt(j, row)) {
+          ctx.fillStyle = '#4c6b3a';
+          ctx.fillRect(jx - ROOM_HALF, fy - 2, ROOM_HALF * 2, 4);
+        }
+        if (shaftAt(j, row)) {
+          drawLadder(jx, fy - 46, fy + RH);
+          drawHatch(jx, fy);
+        }
+      }
+    }
+  }
+
+  function drawExit() {
+    const x = exit.x - camera.x, fy = exit.row * RH - camera.y;
+    if (x < -200 || x > W + 200 || fy < -50 || fy - TUN_H > H + 50) return;
+    const pulse = 0.7 + 0.3 * Math.sin(time * 3);
+    const g = ctx.createRadialGradient(x, fy - 60, 0, x, fy - 60, 180);
+    g.addColorStop(0, `rgba(140, 255, 170, ${0.45 * pulse})`);
+    g.addColorStop(1, 'rgba(140, 255, 170, 0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x - 180, fy - 240, 360, 360);
+
+    ctx.fillStyle = '#4a3420';
+    ctx.beginPath();
+    ctx.moveTo(x - 40, fy);
+    ctx.lineTo(x - 40, fy - 90);
+    ctx.arc(x, fy - 90, 40, Math.PI, 0);
+    ctx.lineTo(x + 40, fy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = `rgba(200, 255, 210, ${0.75 + 0.25 * pulse})`;
+    ctx.beginPath();
+    ctx.moveTo(x - 30, fy);
+    ctx.lineTo(x - 30, fy - 90);
+    ctx.arc(x, fy - 90, 30, Math.PI, 0);
+    ctx.lineTo(x + 30, fy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#f2c14e';
+    ctx.font = 'bold 14px Trebuchet MS, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('EXIT', x, fy - 140);
+  }
+
+  function drawJunctionPrompts() {
+    const g = gnome;
+    if (g.climb || !g.onGround || won) return;
+    const jn = junctionInfo();
+    if (!jn.canUp && !jn.canDown) return;
+    const sx = g.x - camera.x, sy = g.y - camera.y;
+    const a = 0.6 + 0.4 * Math.sin(time * 6);
+    ctx.save();
+    ctx.font = 'bold 14px Trebuchet MS, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = '#f2c14e';
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = `rgba(242, 193, 78, ${a})`;
+    if (jn.canUp) ctx.fillText('▲ W', sx, sy - 88);
+    if (jn.canDown) ctx.fillText('▼ S', sx, sy + 26);
+    ctx.restore();
+  }
+
   function drawDust() {
     const factor = 1.25;
     const off = camera.x * factor;
@@ -285,7 +772,8 @@
     const last = Math.ceil((off + W + cell) / cell);
     for (let i = first; i <= last; i++) {
       const sx = i * cell - off + hash(i, 701) * cell;
-      const sy = (hash(i, 702) * H * 0.9 + time * (8 + hash(i, 703) * 12)) % H;
+      const raw = hash(i, 702) * H + time * (8 + hash(i, 703) * 12) - camera.y * 1.1;
+      const sy = ((raw % H) + H) % H;
       const a = 0.15 + 0.2 * Math.sin(time * 1.5 + i);
       ctx.fillStyle = `rgba(242, 193, 78, ${a})`;
       ctx.beginPath();
@@ -302,24 +790,26 @@
     ctx.save();
     ctx.translate(sx, sy);
 
-    // Shadow
-    const airH = Math.max(0, groundY() - g.y);
-    const shadowS = Math.max(0.3, 1 - airH / 250);
-    ctx.fillStyle = `rgba(0,0,0,${0.35 * shadowS})`;
-    ctx.beginPath();
-    ctx.ellipse(0, airH, 18 * shadowS, 4 * shadowS, 0, 0, Math.PI * 2);
-    ctx.fill();
+    if (!g.climb) {
+      const airH = Math.max(0, g.row * RH - g.y);
+      const shadowS = Math.max(0.3, 1 - airH / 250);
+      ctx.fillStyle = `rgba(0,0,0,${0.35 * shadowS})`;
+      ctx.beginPath();
+      ctx.ellipse(0, airH, 18 * shadowS, 4 * shadowS, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     ctx.scale(g.facing * (2 - g.squash), g.squash);
 
-    const moving = Math.abs(g.vx) > 10 && g.onGround;
+    const moving = (Math.abs(g.vx) > 10 && g.onGround) || !!g.climb;
     const swing = moving ? Math.sin(g.walkPhase) : 0;
     const bob = moving ? Math.abs(Math.sin(g.walkPhase)) * 2 : 0;
+    const grounded = g.onGround || g.climb;
 
     // Legs / boots
     ctx.fillStyle = '#3b2a1a';
-    const legL = g.onGround ? swing * 6 : -4;
-    const legR = g.onGround ? -swing * 6 : 5;
+    const legL = grounded ? swing * 6 : -4;
+    const legR = grounded ? -swing * 6 : 5;
     ctx.fillRect(-8 + legL, -12, 6, 10);
     ctx.fillRect(2 + legR, -12, 6, 10);
     ctx.fillStyle = '#1e140c';
@@ -344,12 +834,13 @@
     ctx.fillStyle = '#f2c14e';
     ctx.fillRect(-2, -17, 4, 4);
 
-    // Arms
+    // Arm (reaches up while climbing)
     ctx.fillStyle = '#2a5f33';
-    const armSwing = moving ? -swing * 5 : (g.onGround ? 0 : -8);
+    const armAngle = g.climb ? Math.PI * (0.85 + 0.1 * swing)
+      : ((moving ? -swing * 5 : (g.onGround ? 0 : -8)) * Math.PI) / 60;
     ctx.save();
     ctx.translate(-9, -28);
-    ctx.rotate((armSwing * Math.PI) / 60);
+    ctx.rotate(armAngle);
     ctx.fillRect(-3, 0, 6, 13);
     ctx.fillStyle = '#f0c8a0';
     ctx.beginPath(); ctx.arc(0, 14, 3, 0, Math.PI * 2); ctx.fill();
@@ -392,76 +883,82 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Update
+  // Minimap — draws ONLY explored tunnel geometry, the gnome and an exit
+  // pointer. Items on paths must never be drawn here.
   // ---------------------------------------------------------------------------
-  let time = 0;
-
-  function update(dt) {
-    time += dt;
+  function drawMinimap() {
     const g = gnome;
-    const gy = groundY();
+    const cellW = mapBig ? 34 : 22, cellH = mapBig ? 26 : 18;
+    const gs = g.x / CW, gr = g.y / RH;
+    const toMap = (seg, row) => [MW / 2 + (seg - gs) * cellW, MH / 2 + (row - gr) * cellH];
 
-    // Horizontal movement
-    const dir = (right() ? 1 : 0) - (left() ? 1 : 0);
-    const control = g.onGround ? 1 : AIR_CONTROL;
-    if (dir !== 0) {
-      g.vx += dir * MOVE_ACCEL * control * dt;
-      g.facing = dir;
-    } else if (g.onGround) {
-      const dec = FRICTION * dt;
-      g.vx = Math.abs(g.vx) <= dec ? 0 : g.vx - Math.sign(g.vx) * dec;
+    mctx.clearRect(0, 0, MW, MH);
+    mctx.fillStyle = '#0d0a14';
+    mctx.fillRect(0, 0, MW, MH);
+
+    const s0 = Math.floor(gs - MW / 2 / cellW) - 1, s1 = Math.ceil(gs + MW / 2 / cellW) + 1;
+    const r0 = Math.max(0, Math.floor(gr - MH / 2 / cellH) - 1), r1 = Math.ceil(gr + MH / 2 / cellH) + 1;
+
+    mctx.lineCap = 'round';
+    mctx.strokeStyle = '#8fb3c9';
+    mctx.lineWidth = 2;
+    for (let row = r0 - 1; row <= r1; row++) {
+      for (let j = s0; j <= s1 + 1; j++) {
+        if (!explored.has('j' + j + ',' + row)) continue;
+        const [x, y0] = toMap(j, row), [, y1] = toMap(j, row + 1);
+        mctx.beginPath(); mctx.moveTo(x, y0); mctx.lineTo(x, y1); mctx.stroke();
+      }
     }
-    g.vx = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, g.vx));
-
-    // Jumping with coyote time + input buffering
-    if (g.onGround) g.lastGrounded = time;
-    const buffered = (performance.now() - jumpPressedAt) / 1000 < JUMP_BUFFER;
-    if (buffered && time - g.lastGrounded < COYOTE_TIME) {
-      g.vy = -JUMP_VEL;
-      g.onGround = false;
-      g.lastGrounded = -Infinity;
-      jumpPressedAt = -Infinity;
-      g.squash = 1.25;
+    mctx.strokeStyle = '#c9a66b';
+    mctx.lineWidth = mapBig ? 6 : 5;
+    for (let row = r0; row <= r1; row++) {
+      for (let s = s0; s <= s1; s++) {
+        if (!explored.has('s' + s + ',' + row)) continue;
+        const [x0, y] = toMap(s, row), [x1] = toMap(s + 1, row);
+        mctx.beginPath(); mctx.moveTo(x0 + 1, y); mctx.lineTo(x1 - 1, y); mctx.stroke();
+      }
     }
 
-    // Variable jump height: release early for a short hop
-    if (!jumpHeld() && g.vy < 0) g.vy += GRAVITY * 1.6 * dt;
-    g.vy += GRAVITY * dt;
-
-    g.x += g.vx * dt;
-    g.y += g.vy * dt;
-
-    // Ground collision
-    if (g.y >= gy) {
-      if (!g.onGround && g.vy > 300) g.squash = 0.75;
-      g.y = gy;
-      g.vy = 0;
-      g.onGround = true;
+    // Exit: a glowing beacon when in view, otherwise a glowing arrow on the edge pointing at it
+    const pulse = 0.6 + 0.4 * Math.sin(time * 4);
+    const [ex, ey] = toMap(exit.x / CW, exit.row);
+    const margin = 12;
+    mctx.save();
+    mctx.shadowColor = '#8cffaa';
+    mctx.shadowBlur = 12 * pulse + 6;
+    mctx.fillStyle = `rgba(160, 255, 185, ${0.7 + 0.3 * pulse})`;
+    if (ex > margin && ex < MW - margin && ey > margin && ey < MH - margin) {
+      mctx.beginPath();
+      mctx.moveTo(ex, ey - 7); mctx.lineTo(ex + 6, ey); mctx.lineTo(ex, ey + 7); mctx.lineTo(ex - 6, ey);
+      mctx.closePath();
+      mctx.fill();
     } else {
-      g.onGround = false;
+      const dx = ex - MW / 2, dy = ey - MH / 2;
+      const t = Math.min((MW / 2 - margin) / Math.abs(dx || 1e-6), (MH / 2 - margin) / Math.abs(dy || 1e-6));
+      const ax = MW / 2 + dx * t, ay = MH / 2 + dy * t;
+      mctx.translate(ax, ay);
+      mctx.rotate(Math.atan2(dy, dx));
+      mctx.beginPath();
+      mctx.moveTo(9, 0); mctx.lineTo(-6, -7); mctx.lineTo(-2, 0); mctx.lineTo(-6, 7);
+      mctx.closePath();
+      mctx.fill();
     }
+    mctx.restore();
 
-    // Ease squash back to 1
-    g.squash += (1 - g.squash) * Math.min(1, dt * 12);
-
-    if (g.onGround && Math.abs(g.vx) > 10) g.walkPhase += dt * Math.abs(g.vx) * 0.05;
-
-    // Camera: gnome stays within a dead zone around the centre
-    const target = g.x - W / 2;
-    const diff = target - camera.x;
-    if (diff > DEAD_ZONE) camera.x += (diff - DEAD_ZONE) * Math.min(1, dt * 8);
-    else if (diff < -DEAD_ZONE) camera.x += (diff + DEAD_ZONE) * Math.min(1, dt * 8);
-
-    distEl.textContent = Math.round(g.x / 40);
+    // Gnome
+    mctx.fillStyle = '#ff5a4a';
+    mctx.strokeStyle = '#fff';
+    mctx.lineWidth = 1.5;
+    mctx.beginPath();
+    mctx.arc(MW / 2, MH / 2, 4, 0, Math.PI * 2);
+    mctx.fill();
+    mctx.stroke();
   }
 
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
   function render() {
-    const gy = groundY();
-
-    // Deep cavern backdrop
     const bg = ctx.createLinearGradient(0, 0, 0, H);
     bg.addColorStop(0, '#07050c');
     bg.addColorStop(0.5, '#140e22');
@@ -472,30 +969,40 @@
     for (let i = 0; i < layers.length; i++) {
       const L = layers[i];
       if (L.stalactite) drawCeiling(L);
-      drawRidge(L, gy);
-      if (i === 1) drawCrystals(0.25, 77, gy);
+      drawRidge(L);
+      if (i === 1) drawCrystals(0.25, 77);
     }
 
-    // Atmospheric haze between background and playfield
-    ctx.fillStyle = 'rgba(20, 12, 30, 0.25)';
+    // Haze, darkening the further down we go
+    const depthDark = Math.min(0.5, gnome.y / RH * 0.04);
+    ctx.fillStyle = `rgba(10, 6, 16, ${0.25 + depthDark})`;
     ctx.fillRect(0, 0, W, H);
 
-    drawGround(gy);
-    drawGnome(gnome.x - camera.x, gnome.y);
+    drawRock();
+    drawMineDetails();
+    drawExit();
+    drawGnome(gnome.x - camera.x, gnome.y - camera.y);
+    drawJunctionPrompts();
     drawDust();
 
-    // Vignette
     const v = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
     v.addColorStop(0, 'rgba(0,0,0,0)');
     v.addColorStop(1, 'rgba(0,0,0,0.65)');
     ctx.fillStyle = v;
     ctx.fillRect(0, 0, W, H);
+
+    drawMinimap();
   }
 
   // ---------------------------------------------------------------------------
-  // Main loop
+  // Boot
   // ---------------------------------------------------------------------------
-  camera.x = gnome.x - W / 2;
+  window.addEventListener('resize', resize);
+  resize();
+
+  const urlSeed = parseInt(new URLSearchParams(location.search).get('seed'), 10);
+  initMine(Number.isFinite(urlSeed) ? urlSeed : (Math.random() * 4294967296) >>> 0);
+
   let last = performance.now();
   function frame(now) {
     const dt = Math.min(0.033, (now - last) / 1000);
