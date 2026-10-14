@@ -14,6 +14,7 @@ A greedy gnome pushes his wheelbarrow through an endless mine, racing a cave-in 
 - **Enter / Space** — start
 - **R** — restart after the results or cave-in screen (same mine, so scores are comparable)
 - **M** — toggle minimap size
+- **G** — route guide on/off
 - **X** — sound on/off
 
 ## How it plays
@@ -44,5 +45,14 @@ Generated in chunks as you explore, so it never ends. All randomness is seeded: 
 always produces the same layout and items. The seed is shown under the minimap and stored in the
 URL — share `?seed=12345` to play the same mine. A guaranteed path to the exit always exists.
 
-The minimap shows only tunnels you've seen, your position, the cave-in front, and a glowing
-marker pointing toward the exit — never the items.
+Dead ends are rare (about 6% of junctions). Each one is blocked by rubble with a **✕ DEAD END**
+sign in the tunnel and marked with a red ✕ on the minimap before you reach it.
+
+## Minimap & route guide
+- Tunnels you've explored, your position (red dot) and the cave-in front (red edge)
+- **EXIT** in gold: a pulsing beacon when it's on the map, or an edge arrow with the distance
+  (e.g. `EXIT 230 m`) when it's off the map
+- A dashed green **route** from you to the exit, recalculated as you move
+- A green arrow beside the gnome shows the next step: walk left/right, or climb up/down
+- Red ✕ marks for dead ends on your level and the levels next to it
+- Never shows items
