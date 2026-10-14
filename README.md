@@ -11,8 +11,10 @@ A greedy gnome pushes his wheelbarrow through an endless mine, racing a cave-in 
 - **Space** (or **W / ↑** away from ladders) — jump; hold for higher jumps
 - **W / ↑** at a ladder junction — climb up a level
 - **S / ↓** at a ladder junction — climb down a level
+- **Enter / Space** — start
+- **R** — restart after the results or cave-in screen (same mine, so scores are comparable)
 - **M** — toggle minimap size
-- **Enter** — next mine after reaching the exit, or retry after a cave-in
+- **X** — sound on/off
 
 ## How it plays
 - **Diamonds & Junk** lie along the tunnels. From afar they're identical glowing orbs — you only
@@ -23,6 +25,19 @@ A greedy gnome pushes his wheelbarrow through an endless mine, racing a cave-in 
   cloud marks a junkier one.
 - **Cave-in:** a collapsing wall advances from the left and speeds up over time. If it catches you,
   it's game over.
+- **Exit:** always 15 tunnel segments (~350 m) to the right of the start. Reaching it freezes the game
+  and shows your results.
+
+## Scoring
+**Final score = diamonds in the wheelbarrow × 100 × time bonus**
+
+The time bonus is ×3.00 if you escape within 45 s, then drops by 1× every 45 s, bottoming out at ×1.00.
+Your best score is saved in the browser with `localStorage`.
+
+## Sound
+All sound is synthesized live with the Web Audio API — a ding for diamonds (rising in pitch as the
+pile grows), a buzz for junk, a rumble that swells as the cave-in closes in, a crash when it catches
+you, and a fanfare at the exit. No audio files.
 
 ## The mine
 Generated in chunks as you explore, so it never ends. All randomness is seeded: the same seed

@@ -59,9 +59,63 @@
     max-width: 90vw;
   }
   #overlay.dead > div { border-color: #c0392b; box-shadow: 0 0 40px rgba(192,57,43,0.35); }
-  #overlay h2 { color: #f2c14e; letter-spacing: 2px; margin-bottom: 8px; }
+  #overlay h2 { color: #f2c14e; letter-spacing: 3px; margin-bottom: 8px; font-size: 30px; }
   #overlay.dead h2 { color: #ff6b5a; }
-  #overlay p { opacity: 0.85; }
+  #overlay p { opacity: 0.85; line-height: 1.5; }
+  #overlay .sub { color: #c9b28a; margin-bottom: 16px; }
+  #overlay ul { list-style: none; text-align: left; margin: 14px auto; max-width: 440px; font-size: 14px; line-height: 1.7; }
+  #overlay ul b { color: #f2c14e; }
+  #overlay .results {
+    display: grid; grid-template-columns: auto auto; gap: 6px 28px;
+    margin: 18px auto; text-align: left; font-size: 16px; width: max-content; max-width: 100%;
+  }
+  #overlay .results span { color: #c9b28a; }
+  #overlay .results b { text-align: right; color: #f5ead0; }
+  #overlay .results .final { font-size: 26px; color: #f2c14e; padding-top: 8px; border-top: 1px solid #5a4632; }
+  #overlay .results .final-label { font-size: 18px; padding-top: 12px; border-top: 1px solid #5a4632; color: #f5ead0; }
+  #overlay .formula { font-size: 13px; color: #8c7a5c; margin-top: -8px; margin-bottom: 14px; }
+  #overlay .newbest {
+    display: inline-block; margin-bottom: 12px; padding: 3px 12px; border-radius: 20px;
+    background: #f2c14e; color: #1a120a; font-weight: bold; letter-spacing: 2px; font-size: 13px;
+    animation: pulse 0.9s ease-in-out infinite alternate;
+  }
+  @keyframes pulse { from { transform: scale(1); } to { transform: scale(1.08); } }
+  #overlay button {
+    font: inherit; font-size: 16px; font-weight: bold; letter-spacing: 1px;
+    padding: 10px 26px; margin-top: 6px; border-radius: 6px; cursor: pointer;
+    background: #f2c14e; color: #1a120a; border: none;
+    box-shadow: 0 4px 0 #a07a24, 0 0 20px rgba(242,193,78,0.35);
+  }
+  #overlay button:hover { background: #ffd56a; }
+  #overlay button:active { transform: translateY(2px); box-shadow: 0 2px 0 #a07a24; }
+  #overlay.dead button { background: #ff7a5a; box-shadow: 0 4px 0 #9a3a28, 0 0 20px rgba(255,122,90,0.35); }
+
+  #stats .gems { display: inline-block; }
+  #stats .gems.bump { animation: bump 0.35s ease-out; }
+  @keyframes bump { 0% { transform: scale(1); } 40% { transform: scale(1.35); color: #7fe8ff; } 100% { transform: scale(1); } }
+  #best { font-size: 13px; color: #f2c14e; margin-top: 2px; }
+
+  /* CSS particle effects for collecting diamonds */
+  #fx { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .gem-fx {
+    position: absolute; width: 8px; height: 8px;
+    background: linear-gradient(135deg, #e8fbff, #4fd3ff);
+    box-shadow: 0 0 8px #6fe3ff, 0 0 16px rgba(111, 227, 255, 0.6);
+    transform: translate(-50%, -50%) rotate(45deg);
+    animation: gemfly var(--dur, 0.7s) cubic-bezier(.2,.7,.4,1) forwards;
+  }
+  @keyframes gemfly {
+    0%   { opacity: 1; transform: translate(-50%, -50%) rotate(45deg) scale(1.2); }
+    100% { opacity: 0; transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) rotate(calc(45deg + var(--rot))) scale(0.2); }
+  }
+  .ring-fx {
+    position: absolute; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid rgba(160, 240, 255, 0.9);
+    box-shadow: 0 0 12px rgba(111, 227, 255, 0.8);
+    transform: translate(-50%, -50%);
+    animation: ringout 0.5s ease-out forwards;
+  }
+  @keyframes ringout { to { width: 90px; height: 90px; opacity: 0; border-width: 1px; } }
 </style>
 </head>
 <body>
@@ -70,18 +124,17 @@
   <h1>GNOME DEEP <span>: Maze of Greed</span></h1>
   <p>A / D or ← / → to walk &nbsp;·&nbsp; Space (or W / ↑) to jump</p>
   <p>At a ladder junction: W / ↑ to climb up, S / ↓ to climb down, or keep walking straight</p>
+  <p>M map size &nbsp;·&nbsp; X sound on/off</p>
   <p id="stats"></p>
+  <p id="best"></p>
 </div>
+<div id="fx"></div>
 <div id="mapPanel">
   <div class="title">MINIMAP <span>[M] resize</span></div>
   <canvas id="minimap"></canvas>
   <div id="mapInfo"></div>
 </div>
-<div id="overlay"><div>
-  <h2 id="overlayTitle"></h2>
-  <p id="overlayText"></p>
-  <p id="overlayHint" style="margin-top:10px"></p>
-</div></div>
+<div id="overlay"><div id="overlayBox"></div></div>
 
 <script>
 (() => {
@@ -98,10 +151,10 @@
   const mctx = mapCanvas.getContext('2d');
   const mapInfoEl = document.getElementById('mapInfo');
   const statsEl = document.getElementById('stats');
+  const bestEl = document.getElementById('best');
+  const fxEl = document.getElementById('fx');
   const overlayEl = document.getElementById('overlay');
-  const overlayTitleEl = document.getElementById('overlayTitle');
-  const overlayTextEl = document.getElementById('overlayText');
-  const overlayHintEl = document.getElementById('overlayHint');
+  const overlayBoxEl = document.getElementById('overlayBox');
   let W = 0, H = 0, DPR = 1;
   let mapBig = false, MW = 220, MH = 160;
 
@@ -136,14 +189,16 @@
 
   window.addEventListener('keydown', e => {
     if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+    initAudio();   // browsers only allow audio after a user gesture
     if (!keys.has(e.code)) {
       const now = performance.now();
       if (e.code === 'Space') pressedAt.jump = now;
       if (e.code === 'KeyW' || e.code === 'ArrowUp') pressedAt.up = now;
       if (e.code === 'KeyS' || e.code === 'ArrowDown') pressedAt.down = now;
       if (e.code === 'KeyM') { mapBig = !mapBig; sizeMinimap(); }
-      if (e.code === 'Enter' && state === 'won') nextMine();
-      if (e.code === 'Enter' && state === 'dead') restartRun();
+      if (e.code === 'KeyX') toggleMute();
+      if ((e.code === 'Enter' || e.code === 'Space') && state === 'ready') startRun();
+      if (e.code === 'KeyR' && (state === 'won' || state === 'dead')) restartRun();
     }
     keys.add(e.code);
   });
@@ -156,6 +211,106 @@
   const downHeld = () => keys.has('KeyS') || keys.has('ArrowDown');
   const jumpHeld = () => keys.has('Space') || upHeld();
   const fresh = t => (performance.now() - t) / 1000 < INPUT_BUFFER;
+
+  // ---------------------------------------------------------------------------
+  // Sound — synthesized with the Web Audio API, no audio files
+  // ---------------------------------------------------------------------------
+  let actx = null, master = null, rumbleGain = null, noiseBuf = null, muted = false;
+
+  function initAudio() {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (actx) { if (actx.state === 'suspended') actx.resume(); return; }
+    actx = new AC();
+    master = actx.createGain();
+    master.gain.value = muted ? 0 : 0.5;
+    master.connect(actx.destination);
+
+    // Two seconds of brown noise, reused for the rumble loop and the crash
+    const len = actx.sampleRate * 2;
+    noiseBuf = actx.createBuffer(1, len, actx.sampleRate);
+    const data = noiseBuf.getChannelData(0);
+    let lastOut = 0;
+    for (let i = 0; i < len; i++) {
+      lastOut = (lastOut + 0.02 * (Math.random() * 2 - 1)) / 1.02;
+      data[i] = lastOut * 3.5;
+    }
+
+    // Continuous cave-in rumble; its volume follows how close the wall is
+    const src = actx.createBufferSource();
+    src.buffer = noiseBuf;
+    src.loop = true;
+    const lp = actx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 120;
+    rumbleGain = actx.createGain();
+    rumbleGain.gain.value = 0;
+    src.connect(lp).connect(rumbleGain).connect(master);
+    src.start();
+  }
+
+  function toggleMute() {
+    muted = !muted;
+    if (master) master.gain.setTargetAtTime(muted ? 0 : 0.5, actx.currentTime, 0.02);
+  }
+
+  function tone(freq, { type = 'sine', start = 0, dur = 0.2, vol = 0.3, to = freq, filter = 0 } = {}) {
+    if (!actx) return;
+    const t0 = actx.currentTime + start;
+    const osc = actx.createOscillator();
+    const gain = actx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (to !== freq) osc.frequency.exponentialRampToValueAtTime(to, t0 + dur);
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(vol, t0 + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    let node = osc.connect(gain);
+    if (filter) {
+      const f = actx.createBiquadFilter();
+      f.type = 'lowpass';
+      f.frequency.value = filter;
+      node = node.connect(f);
+    }
+    node.connect(master);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.05);
+  }
+
+  const sfx = {
+    ding(pile) {
+      const lift = Math.pow(2, Math.min(pile, 12) / 24);   // rises gently as the pile grows
+      tone(1318 * lift, { dur: 0.35, vol: 0.22 });
+      tone(1976 * lift, { start: 0.06, dur: 0.45, vol: 0.18 });
+      tone(3952 * lift, { start: 0.06, dur: 0.15, vol: 0.04 });
+    },
+    buzz() {
+      tone(140, { type: 'sawtooth', dur: 0.38, vol: 0.25, to: 80, filter: 1400 });
+      tone(147, { type: 'square', dur: 0.38, vol: 0.12, to: 84, filter: 1000 });
+    },
+    win() {
+      [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, { type: 'triangle', start: i * 0.1, dur: 0.5, vol: 0.2 }));
+    },
+    crash() {
+      if (!actx) return;
+      const src = actx.createBufferSource();
+      src.buffer = noiseBuf;
+      const lp = actx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 400;
+      const g = actx.createGain();
+      const t0 = actx.currentTime;
+      g.gain.setValueAtTime(1.6, t0);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + 1.6);
+      src.connect(lp).connect(g).connect(master);
+      src.start(t0);
+      src.stop(t0 + 1.7);
+      tone(90, { dur: 1.2, vol: 0.4, to: 30 });
+    },
+    setRumble(level) {
+      if (rumbleGain) rumbleGain.gain.setTargetAtTime(level, actx.currentTime, 0.15);
+    },
+  };
 
   // ---------------------------------------------------------------------------
   // Noise for decorative background (not seed dependent)
@@ -211,7 +366,9 @@
   const OPEN_CHANCE = 0.6;
   const SHAFT_CHANCE = 0.3;
 
-  let seed = 0, mineNo = 1;
+  const EXIT_SEGMENT = 15;   // the exit is always this many segments to the right of the start
+
+  let seed = 0;
   let spineCache, chunks, explored, collected, exit;
 
   function spineStep(cx) {
@@ -346,20 +503,40 @@
   const camera = { x: 0, y: 0 };
   const DEAD_ZONE = 40;
 
+  // Scoring: diamonds × points × time bonus (finish within PAR_TIME for the full bonus)
+  const DIAMOND_POINTS = 100;
+  const PAR_TIME = 45;
+  const MAX_BONUS = 3;
+  const BONUS_LOSS_PER_SEC = 1 / 45;   // bonus drops by 1× every 45 s past par, down to 1×
+  const BEST_KEY = 'gnomeDeep.bestScore';
+
   let time = 0, mineTime = 0;
-  let state = 'play';          // 'play' | 'won' | 'dead'
+  let state = 'ready';         // 'ready' | 'play' | 'won' | 'dead'
   let diamonds = 0, speedMult = 1;
   let wallX = 0, shake = 0;
+  let bestScore = loadBest();
   const particles = [];
 
-  function initMine(newSeed) {
+  function loadBest() {
+    try { return parseInt(localStorage.getItem(BEST_KEY), 10) || 0; } catch (_) { return 0; }
+  }
+  function saveBest(v) {
+    try { localStorage.setItem(BEST_KEY, String(v)); } catch (_) { /* storage blocked — keep in memory */ }
+  }
+
+  const timeBonus = t => Math.max(1, Math.min(MAX_BONUS, MAX_BONUS - Math.max(0, t - PAR_TIME) * BONUS_LOSS_PER_SEC));
+  const fmtTime = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
+  const fmtNum = n => n.toLocaleString('en-US');
+
+  function initMine(newSeed, startState) {
     seed = newSeed >>> 0;
     spineCache = new Map([[0, START_ROW]]);
     chunks = new Map();
     explored = new Set();
     collected = new Set();
-    const exitCx = 12 + Math.floor(rnd(0, 0, 9) * 8);
-    exit = { cx: exitCx, row: spineRow(exitCx), x: exitCx * CW + CW / 2 };
+    exit = { cx: EXIT_SEGMENT, row: spineRow(EXIT_SEGMENT), x: EXIT_SEGMENT * CW + CW / 2 };
+    diamonds = 0;
+    speedMult = 1;
 
     Object.assign(gnome, {
       x: CW / 2, row: START_ROW, y: START_ROW * RH, vx: 0, vy: 0,
@@ -369,9 +546,11 @@
     camera.y = gnome.y - H * 0.62;
     wallX = gnome.x - W / 2 - WALL_LEASH;
     mineTime = 0;
+    shake = 0;
     particles.length = 0;
-    state = 'play';
-    overlayEl.className = '';
+    state = startState;
+    if (state === 'ready') showIntro();
+    else overlayEl.className = '';
 
     try {
       const u = new URL(location.href);
@@ -380,26 +559,88 @@
     } catch (_) { /* file:// or sandboxed — seed still shown in the panel */ }
   }
 
-  // Diamonds and slowdown carry over into the next mine
-  function nextMine() {
-    mineNo++;
-    initMine(mix(seed + 1));
+  function startRun() {
+    state = 'play';
+    overlayEl.className = '';
+    pressedAt.jump = pressedAt.up = -Infinity;   // the key that started the run shouldn't also jump
   }
 
-  // After a cave-in, retry the same mine from scratch
+  // R replays the same mine (same seed), so scores are comparable
   function restartRun() {
-    mineNo = 1;
-    diamonds = 0;
-    speedMult = 1;
-    initMine(seed);
+    initMine(seed, 'play');
+    pressedAt.jump = pressedAt.up = -Infinity;
   }
 
-  function showOverlay(kind, title, text, hint) {
-    state = kind;
-    overlayTitleEl.textContent = title;
-    overlayTextEl.textContent = text;
-    overlayHintEl.innerHTML = hint;
+  function showOverlay(kind, html) {
+    overlayBoxEl.innerHTML = html;
     overlayEl.className = 'show ' + kind;
+    const btn = overlayBoxEl.querySelector('button');
+    if (btn) btn.addEventListener('click', () => { initAudio(); restartRun(); });
+  }
+
+  function showIntro() {
+    showOverlay('ready', `
+      <h2>GNOME DEEP</h2>
+      <p class="sub">Maze of Greed</p>
+      <ul>
+        <li>Push your wheelbarrow to the <b>EXIT</b> before the cave-in catches you.</li>
+        <li>Glowing orbs are <b>diamonds</b> or <b>junk</b>, and you can't tell which until you're close.</li>
+        <li>Junk knocks diamonds out of the barrow and slows you down for good. Jump over it!</li>
+        <li><b>Sparkles</b> at a junction mean richer tunnels; <b>dust</b> means junk.</li>
+        <li>Score = diamonds × ${DIAMOND_POINTS} × time bonus (up to ×${MAX_BONUS}).</li>
+      </ul>
+      ${bestScore ? `<p class="sub">Best score: <b>${fmtNum(bestScore)}</b></p>` : ''}
+      <p>Press <b>Enter</b> or <b>Space</b> to start</p>`);
+  }
+
+  function showResults() {
+    state = 'won';
+    sfx.win();
+    sfx.setRumble(0);
+    const t = mineTime, bonus = timeBonus(t);
+    const score = Math.round(diamonds * DIAMOND_POINTS * bonus);
+    const isBest = score > bestScore;
+    if (isBest) { bestScore = score; saveBest(score); }
+    showOverlay('won', `
+      <h2>MINE ESCAPED!</h2>
+      <p class="sub">The gnome made it out with his loot.</p>
+      ${isBest ? '<div class="newbest">NEW BEST!</div>' : ''}
+      <div class="results">
+        <span>Diamonds</span><b>${diamonds} 💎</b>
+        <span>Time taken</span><b>${fmtTime(t)}</b>
+        <span>Time bonus</span><b>×${bonus.toFixed(2)}</b>
+        <span class="final-label">Final score</span><b class="final" id="finalScore">0</b>
+        <span>Best score</span><b>${fmtNum(bestScore)}</b>
+      </div>
+      <p class="formula">${diamonds} × ${DIAMOND_POINTS} × ${bonus.toFixed(2)}</p>
+      <button type="button">Press R to Restart</button>`);
+    countUp(document.getElementById('finalScore'), score);
+  }
+
+  function showDead() {
+    state = 'dead';
+    shake = 14;
+    sfx.crash();
+    sfx.setRumble(0);
+    showOverlay('dead', `
+      <h2>CAVE-IN!</h2>
+      <p class="sub">The mine collapsed and buried ${diamonds} diamond${diamonds === 1 ? '' : 's'} with the gnome.</p>
+      <div class="results">
+        <span>Time survived</span><b>${fmtTime(mineTime)}</b>
+        <span class="final-label">Final score</span><b class="final">0</b>
+        <span>Best score</span><b>${fmtNum(bestScore)}</b>
+      </div>
+      <button type="button">Press R to Restart</button>`);
+  }
+
+  function countUp(el, target) {
+    const t0 = performance.now(), dur = 900;
+    const tick = now => {
+      const k = Math.min(1, (now - t0) / dur);
+      el.textContent = fmtNum(Math.round(target * (1 - Math.pow(1 - k, 3))));
+      if (k < 1 && el.isConnected !== false) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   }
 
   // Drop chunks far from the gnome so memory stays bounded on endless walks
@@ -426,6 +667,29 @@
         vx: (Math.random() - 0.5) * 80, vy: -20 - Math.random() * 40, life: 0.8 + Math.random() * 0.6, size: 8 + Math.random() * 10 });
     }
   }
+  // DOM/CSS particle burst over the canvas (screen coordinates)
+  function cssBurst(x, y) {
+    const ring = document.createElement('div');
+    ring.className = 'ring-fx';
+    ring.style.left = x + 'px';
+    ring.style.top = y + 'px';
+    ring.addEventListener('animationend', () => ring.remove());
+    fxEl.appendChild(ring);
+    for (let i = 0; i < 12; i++) {
+      const el = document.createElement('i');
+      const a = (i / 12) * Math.PI * 2 + Math.random() * 0.4, d = 40 + Math.random() * 50;
+      el.className = 'gem-fx';
+      el.style.left = x + 'px';
+      el.style.top = y + 'px';
+      el.style.setProperty('--dx', Math.cos(a) * d + 'px');
+      el.style.setProperty('--dy', Math.sin(a) * d - 20 + 'px');
+      el.style.setProperty('--rot', (Math.random() * 360 - 180) + 'deg');
+      el.style.setProperty('--dur', (0.5 + Math.random() * 0.4) + 's');
+      el.addEventListener('animationend', () => el.remove());
+      fxEl.appendChild(el);
+    }
+  }
+
   function floatText(x, y, text, color) {
     spawn({ kind: 'text', x, y, vy: -45, life: 1.2, text, color });
   }
@@ -575,8 +839,12 @@
         if (it.type === 'diamond') {
           diamonds++;
           burstSparkle(it.x, itemY);
+          cssBurst(it.x - camera.x, itemY - camera.y);
           floatText(bx, by - 20, '+1 💎', '#7fe8ff');
+          sfx.ding(diamonds);
+          bumpGemCounter = true;
         } else {
+          sfx.buzz();
           const lost = Math.min(diamonds, JUNK_DIAMOND_LOSS);
           diamonds -= lost;
           speedMult = Math.max(MIN_SPEED_MULT, speedMult * JUNK_SLOWDOWN);
@@ -599,6 +867,8 @@
 
     const gap = g.x + extents(g.facing)[0] - wallX;
     if (gap < 500) shake = Math.max(shake, (1 - Math.max(0, gap) / 500) * 5);
+    const closeness = 1 - Math.min(1, Math.max(0, gap) / 900);
+    sfx.setRumble((0.12 + closeness * closeness * 1.1) * (0.8 + 0.2 * Math.sin(time * 5)));
 
     // Falling rubble along the advancing face
     const sx = wallX - camera.x;
@@ -611,12 +881,7 @@
         life: 1.2, size: 18 + Math.random() * 18 });
     }
 
-    if (gap <= 0) {
-      shake = 14;
-      showOverlay('dead', 'CAVE-IN!',
-        `The mine collapsed on you with ${diamonds} diamond${diamonds === 1 ? '' : 's'} in the wheelbarrow.`,
-        'Press <b>Enter</b> to try this mine again');
-    }
+    if (gap <= 0) showDead();
   }
 
   function markExplored() {
@@ -637,7 +902,13 @@
     }
   }
 
-  let lastInfo = '', lastStats = '';
+  let lastInfo = '', bumpGemCounter = false;
+  statsEl.innerHTML = '<span class="gems" data-k="gems"></span> &nbsp;·&nbsp; <span data-k="time"></span>' +
+    ' &nbsp;·&nbsp; <span data-k="bonus"></span> &nbsp;·&nbsp; <span data-k="speed"></span><br>' +
+    '<span data-k="exit"></span> &nbsp;·&nbsp; <span data-k="wall"></span>';
+  const statEls = {};
+  statsEl.querySelectorAll('[data-k]').forEach(el => { statEls[el.dataset.k] = el; });
+  function setStat(k, text) { if (statEls[k].textContent !== text) statEls[k].textContent = text; }
   function update(dt) {
     time += dt;
     const g = gnome;
@@ -663,19 +934,30 @@
     markExplored();
     evictChunks();
 
-    if (state === 'play' && !g.climb && g.row === exit.row && Math.abs(g.x - exit.x) < 40) {
-      showOverlay('won', 'EXIT FOUND!',
-        `You escaped mine #${mineNo} with ${diamonds} diamond${diamonds === 1 ? '' : 's'} in the wheelbarrow.`,
-        'Press <b>Enter</b> to descend into the next mine');
-    }
+    // Reaching the exit freezes the game (state leaves 'play') and shows results
+    if (state === 'play' && !g.climb && g.row === exit.row && Math.abs(g.x - exit.x) < 40) showResults();
 
-    const info = `Mine #${mineNo} · Depth ${Math.round(g.y / RH * 12)} m<br>Seed ${seed}`;
+    const info = `Depth ${Math.round(g.y / RH * 12)} m · Seed ${seed}`;
     if (info !== lastInfo) { mapInfoEl.innerHTML = info; lastInfo = info; }
 
     const behind = Math.max(0, Math.round((g.x + extents(g.facing)[0] - wallX) / 40));
-    const stats = `💎 ${diamonds} &nbsp;·&nbsp; Speed ${Math.round(speedMult * 100)}% &nbsp;·&nbsp; ` +
-      `<span class="${behind < 12 ? 'warn' : ''}">Cave-in ${behind} m behind</span>`;
-    if (stats !== lastStats) { statsEl.innerHTML = stats; lastStats = stats; }
+    const toExit = Math.max(0, Math.round((exit.x - g.x) / 40));
+    setStat('gems', `💎 ${diamonds}`);
+    setStat('time', `⏱ ${fmtTime(mineTime)}`);
+    setStat('bonus', `×${timeBonus(mineTime).toFixed(2)} bonus`);
+    setStat('speed', `Speed ${Math.round(speedMult * 100)}%`);
+    setStat('exit', `Exit ${toExit} m →`);
+    setStat('wall', `Cave-in ${behind} m behind`);
+    statEls.wall.classList.toggle('warn', behind < 12);
+    if (bumpGemCounter) {
+      const gemsEl = statEls.gems;
+      gemsEl.classList.remove('bump');
+      void gemsEl.offsetWidth;   // restart the CSS animation
+      gemsEl.classList.add('bump');
+      bumpGemCounter = false;
+    }
+    const best = `Best score: ${fmtNum(bestScore)}`;
+    if (bestEl.textContent !== best) bestEl.textContent = best;
   }
 
   // ---------------------------------------------------------------------------
@@ -1098,10 +1380,43 @@
     ctx.lineTo(x + 30, fy);
     ctx.closePath();
     ctx.fill();
-    ctx.fillStyle = '#f2c14e';
-    ctx.font = 'bold 14px Trebuchet MS, sans-serif';
+    // Daylight rays spilling out of the doorway
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 5; i++) {
+      const a = -Math.PI / 2 + (i - 2) * 0.32 + Math.sin(time * 0.8 + i) * 0.05;
+      ctx.fillStyle = `rgba(255, 245, 200, ${0.05 + 0.03 * Math.sin(time * 2 + i)})`;
+      ctx.beginPath();
+      ctx.moveTo(x - 10, fy - 60);
+      ctx.lineTo(x + Math.cos(a - 0.08) * 260, fy - 60 + Math.sin(a - 0.08) * 260);
+      ctx.lineTo(x + Math.cos(a + 0.08) * 260, fy - 60 + Math.sin(a + 0.08) * 260);
+      ctx.lineTo(x + 10, fy - 60);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Hanging wooden sign
+    const sy = fy - 168 + Math.sin(time * 1.5) * 2;
+    ctx.strokeStyle = '#2a2018';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x - 30, fy - TUN_H + 14); ctx.lineTo(x - 30, sy - 14);
+    ctx.moveTo(x + 30, fy - TUN_H + 14); ctx.lineTo(x + 30, sy - 14);
+    ctx.stroke();
+    ctx.fillStyle = '#6e4a2a';
+    ctx.fillRect(x - 48, sy - 16, 96, 32);
+    ctx.strokeStyle = '#3d2a17';
+    ctx.strokeRect(x - 48, sy - 16, 96, 32);
+    ctx.save();
+    ctx.shadowColor = '#f2c14e';
+    ctx.shadowBlur = 12 * pulse;
+    ctx.fillStyle = '#ffe08a';
+    ctx.font = 'bold 20px Trebuchet MS, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('EXIT', x, fy - 140);
+    ctx.textBaseline = 'middle';
+    ctx.fillText('EXIT', x, sy + 1);
+    ctx.restore();
   }
 
   function drawJunctionPrompts() {
@@ -1548,7 +1863,7 @@
   resize();
 
   const urlSeed = parseInt(new URLSearchParams(location.search).get('seed'), 10);
-  initMine(Number.isFinite(urlSeed) ? urlSeed : (Math.random() * 4294967296) >>> 0);
+  initMine(Number.isFinite(urlSeed) ? urlSeed : (Math.random() * 4294967296) >>> 0, 'ready');
 
   let last = performance.now();
   function frame(now) {
